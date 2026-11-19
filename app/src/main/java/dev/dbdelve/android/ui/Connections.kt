@@ -107,7 +107,7 @@ fun ConnectionsScreen(model: AppViewModel) {
                             DropdownMenuItem(
                                 text = { Text("Check automatically") },
                                 trailingIcon = { Checkbox(checked = model.automaticUpdates, onCheckedChange = null) },
-                                onClick = { model.setAutomaticUpdates(!model.automaticUpdates) },
+                                onClick = { model.changeAutomaticUpdates(!model.automaticUpdates) },
                             )
                         }
                     }

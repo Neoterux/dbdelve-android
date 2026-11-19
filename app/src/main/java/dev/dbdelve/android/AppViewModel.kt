@@ -582,7 +582,7 @@ class AppViewModel(
     private fun worthShowing(release: Updates.Release) =
         Updates.isNewer(release.version, installedVersion) && release.version != updates.dismissed
 
-    fun setAutomaticUpdates(on: Boolean) {
+    fun changeAutomaticUpdates(on: Boolean) {
         updates.automatic = on
         automaticUpdates = on
         if (on) checkForUpdates(manual = false)
