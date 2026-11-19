@@ -19,6 +19,7 @@ import dev.dbdelve.android.data.ProfileStore
 import dev.dbdelve.android.data.Secrets
 import dev.dbdelve.android.data.SavedQueryStore
 import dev.dbdelve.android.data.TabStore
+import dev.dbdelve.android.data.UpdateStore
 import dev.dbdelve.android.ui.ConnectionForm
 import dev.dbdelve.android.ui.ConnectionsScreen
 import dev.dbdelve.android.ui.DBDelveTheme
@@ -34,6 +35,8 @@ class MainActivity : FragmentActivity() {
                     Secrets(applicationContext),
                     TabStore(File(filesDir, "tabs")),
                     SavedQueryStore(filesDir),
+                    UpdateStore(applicationContext),
+                    packageManager.getPackageInfo(packageName, 0).versionName ?: "0",
                 ) { connection ->
                     QueryService.keepAlive(applicationContext, connection)
                 }
@@ -44,6 +47,8 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Throttled and off when the user turned it off: see checkForUpdates.
+        model.checkForUpdates(manual = false)
         setContent {
             DBDelveTheme {
                 Surface {

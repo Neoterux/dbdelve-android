@@ -26,6 +26,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -55,6 +59,7 @@ import androidx.compose.ui.unit.sp
 import dev.dbdelve.android.AppViewModel
 import dev.dbdelve.android.Screen
 import dev.dbdelve.android.data.Profile
+import dev.dbdelve.android.data.Updates
 import uniffi.dbdelve_core.Mode
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -94,6 +99,16 @@ fun ConnectionsScreen(model: AppViewModel) {
                                 onClick = { menu = false; pick.launch(arrayOf("*/*")) },
                             )
                             DropdownMenuItem(text = { Text("What's new") }, onClick = { menu = false; changelog = true })
+                            DropdownMenuItem(
+                                text = { Text(if (model.checkingUpdates) "Checking for updates…" else "Check for updates") },
+                                enabled = !model.checkingUpdates,
+                                onClick = { menu = false; model.checkForUpdates(manual = true) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Check automatically") },
+                                trailingIcon = { Checkbox(checked = model.automaticUpdates, onCheckedChange = null) },
+                                onClick = { model.changeAutomaticUpdates(!model.automaticUpdates) },
+                            )
                         }
                     }
                 },
@@ -116,6 +131,7 @@ fun ConnectionsScreen(model: AppViewModel) {
         },
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
+            model.update?.let { release -> UpdateBanner(model, release) }
             OutlinedTextField(
                 value = filter,
                 onValueChange = { filter = it },
@@ -244,4 +260,35 @@ fun ModeBadge(mode: Mode) {
             .background(color.copy(alpha = 0.14f), RoundedCornerShape(5.dp))
             .padding(horizontal = 6.dp, vertical = 3.dp),
     )
+}
+
+/**
+ * A newer release than the one installed. Download opens its APK in the
+ * browser, which saves it; opening the file hands it to Android's installer,
+ * which updates the app in place when the release is signed with the same key.
+ */
+@Composable
+private fun UpdateBanner(model: AppViewModel, release: Updates.Release) {
+    val uri = LocalUriHandler.current
+    Card(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+    ) {
+        Column(Modifier.padding(start = 16.dp, top = 12.dp, end = 8.dp, bottom = 4.dp)) {
+            Text("DBDelve ${release.version} is available", fontWeight = FontWeight.SemiBold)
+            Text(
+                "You have ${model.installedVersion}.",
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                TextButton(onClick = model::dismissUpdate) { Text("Later") }
+                TextButton(onClick = { runCatching { uri.openUri(release.page) } }) { Text("What's new") }
+                TextButton(onClick = {
+                    runCatching { uri.openUri(release.download) }
+                        .onFailure { model.connectError = "No app on this phone opens web links." }
+                }) { Text("Download") }
+            }
+        }
+    }
 }
