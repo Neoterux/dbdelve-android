@@ -14,18 +14,22 @@ starts Read-only.
 Get the latest APK from the
 [Releases page](https://github.com/Neoterux/dbdelve-android/releases/latest)
 and open it on the phone (allow installing from your browser or file manager
-when Android asks). It needs a 64-bit ARM phone on Android 15.
+when Android asks). It needs a 64-bit ARM phone on Android 13 or later.
 
 What changed in each version is in [CHANGELOG.md](CHANGELOG.md), and in the
 app under **What's new**.
 
 ## Target
 
-64-bit ARM phones on Android 15.
+64-bit ARM phones on Android 13 or later.
 
-- **Only `arm64-v8a`, only Android 15 (`minSdk 35`).** That halves the native
-  build and drops every compatibility path. It also means no x86_64 emulator
-  image: test on a phone.
+- **Only `arm64-v8a`, only Android 13 and later (`minSdk 33`, built against
+  and targeting 35).** One ABI halves the native build. Android 13 is the
+  floor because nothing the app uses needs a version check from there up:
+  biometric-or-PIN prompts, the Keystore's AES-GCM, typed foreground services
+  and predictive back all exist on 13. The core is linked for API 33
+  (`cargo ndk -p 33`), and that must stay equal to `minSdk`. No x86_64
+  emulator image either: test on a phone.
 - **No CPU-specific tuning of the Rust core.** It waits on the network, not
   the CPU, and rustls's crypto already detects and uses the chip's AES and SHA
   instructions at runtime.

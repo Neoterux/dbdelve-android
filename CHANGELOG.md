@@ -7,6 +7,10 @@ to its version and date.
 
 ## Unreleased
 
+### Changed
+
+- Runs on Android 13 and 14 as well as Android 15.
+
 ## 0.1.0 (2026-11-19)
 
 The first public build.

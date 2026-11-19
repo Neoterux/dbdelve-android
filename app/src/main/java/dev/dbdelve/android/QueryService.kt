@@ -25,8 +25,8 @@ import kotlinx.coroutines.launch
  * It stops itself, after entering the foreground, once [running] clears.
  * Stopping it from outside could land before `startForeground`, which
  * Android punishes by crashing the app, and most statements finish in
- * milliseconds. The app never asks for the notification permission, so on
- * Android 15 the notification stays out of the shade and nothing flickers.
+ * milliseconds. The app never asks for the notification permission, so from
+ * Android 13 on the notification stays out of the shade and nothing flickers.
  */
 class QueryService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -54,7 +54,10 @@ class QueryService : Service() {
         return START_NOT_STICKY
     }
 
-    /** Android 15 caps a data-sync service; the statement goes on without it. */
+    /**
+     * Android 15 caps a data-sync service; the statement goes on without it.
+     * Android 13 and 14 have no cap and never call this.
+     */
     override fun onTimeout(startId: Int, fgsType: Int) {
         stopSelf()
     }
