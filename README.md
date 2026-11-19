@@ -1,5 +1,9 @@
 # DBDelve for Android
 
+An Android port of [DBDelve](https://github.com/ShayanAbbas1/dbdelve), the
+native desktop database client. It keeps DBDelve's rules and is licensed, like
+DBDelve, under the GPL v3 ([LICENSE](LICENSE)).
+
 A native Android client for **PostgreSQL, MySQL 5.6.5 or later, and MongoDB**,
 built on the same rules as the desktop app: your statement runs exactly as
 typed, every statement passes the connection's mode first, and a connection
@@ -25,9 +29,9 @@ starts Read-only.
 ## How it is built
 
 ```text
-android/
-  core/   Rust: the three drivers, the gate, statement splitting (UniFFI)
-  app/    Kotlin + Jetpack Compose: the UI, Keystore, the biometric prompt
+core/   Rust: the three drivers, the gate, statement splitting (UniFFI)
+app/    Kotlin + Jetpack Compose: the UI, Keystore, the biometric prompt
+docs/   mockup.html, the interface design this app follows
 ```
 
 **Kotlin and Compose for everything you touch, Rust for everything that talks
@@ -42,10 +46,11 @@ biometrics and Keystore are built for. The database side is Rust because:
   doesn't target Android. Neither does Rust officially, but these Rust drivers
   are plain Rust, with no JVM classes Android lacks.
 
-`core` is its own Cargo workspace, kept out of the desktop crate, so the
-desktop build and upstream merges are untouched. Its lockfile was seeded from
-the desktop's: `mysql` 28.0.0 has since been yanked from crates.io, and only a
-lockfile that already holds it can still resolve it.
+The gate in `core/src/gate.rs` is adapted from DBDelve's desktop
+`sql::classify` and `sql::gate`. When the desktop's gate changes, port the
+change here. `core`'s lockfile was seeded from the desktop's: `mysql` 28.0.0
+has since been yanked from crates.io, and only a lockfile that already holds it
+can still resolve it. Keep `Cargo.lock` committed.
 
 `Session::run` is the only way a statement reaches a server, and it classifies
 and gates before sending. When the gate stops a statement, the app shows the
@@ -61,8 +66,7 @@ Prerequisites: Android SDK 35 and an NDK, Rust with the Android targets, and
 rustup target add aarch64-linux-android
 cargo install cargo-ndk
 export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/<version>
-cd android
-./gradlew :app:assembleDebug        # or open android/ in Android Studio
+./gradlew :app:assembleDebug        # or open this folder in Android Studio
 ```
 
 To install on the phone, turn on *Developer options → USB debugging* (tap
@@ -76,7 +80,7 @@ describe the core that is packaged.
 ## Checks
 
 ```sh
-cd android/core
+cd core
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test                                   # gate, Mongo parser, splitting
@@ -192,7 +196,7 @@ Deliberate cuts, not oversights; those with a ceiling in the code are marked
   process alive, but the session belongs to the view model, so a statement
   still ends if Android destroys the activity outright.
 - **Command palette, query history, completion, Explain, and the tablet
-  layout from the mockup** (`../design/android/dbdelve-android.html`).
+  layout from the mockup** ([docs/mockup.html](docs/mockup.html)).
 
 ## What has and hasn't been compiled
 
