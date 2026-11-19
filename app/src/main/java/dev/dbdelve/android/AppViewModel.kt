@@ -16,6 +16,8 @@ import dev.dbdelve.android.data.SavedQuery
 import dev.dbdelve.android.data.SavedQueryStore
 import dev.dbdelve.android.data.SharedConnection
 import dev.dbdelve.android.data.TabStore
+import dev.dbdelve.android.data.UpdateStore
+import dev.dbdelve.android.data.Updates
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -84,6 +86,9 @@ class AppViewModel(
     private val secrets: Secrets,
     private val tabStore: TabStore,
     private val savedStore: SavedQueryStore,
+    private val updates: UpdateStore,
+    /** This build's versionName, which releases are compared against. */
+    val installedVersion: String,
     /** Called with the connection's name while a statement runs, null after. */
     private val keepAlive: (connection: String?) -> Unit,
 ) : ViewModel() {
@@ -566,7 +571,60 @@ class AppViewModel(
         execute(tab, text, emptyList(), runOnce = false, onceIn = null)
     }
 
+    /** A newer release than this build, not put off by the user. */
+    var update by mutableStateOf(updates.found?.takeIf(::worthShowing))
+        private set
+    var checkingUpdates by mutableStateOf(false)
+        private set
+    var automaticUpdates by mutableStateOf(updates.automatic)
+        private set
+
+    private fun worthShowing(release: Updates.Release) =
+        Updates.isNewer(release.version, installedVersion) && release.version != updates.dismissed
+
+    fun setAutomaticUpdates(on: Boolean) {
+        updates.automatic = on
+        automaticUpdates = on
+        if (on) checkForUpdates(manual = false)
+    }
+
+    /**
+     * Asks GitHub for the latest release. By itself (on launch) at most once
+     * every [UPDATE_INTERVAL], silently, and not at all when turned off; on
+     * request, always, and says what it found, including nothing.
+     */
+    fun checkForUpdates(manual: Boolean) {
+        if (checkingUpdates) return
+        if (!manual && (!updates.automatic || System.currentTimeMillis() - updates.lastCheck < UPDATE_INTERVAL)) return
+        checkingUpdates = true
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { Updates.fetchLatest() } }
+            checkingUpdates = false
+            result.onSuccess { latest ->
+                updates.lastCheck = System.currentTimeMillis()
+                val newer = latest?.takeIf { Updates.isNewer(it.version, installedVersion) }
+                updates.found = newer
+                // Asking by hand brings back a version put off earlier.
+                if (manual && newer != null && newer.version == updates.dismissed) updates.dismissed = null
+                update = newer?.takeIf(::worthShowing)
+                if (manual && newer == null) connectError = "DBDelve $installedVersion is the latest version."
+            }.onFailure { error ->
+                if (manual) connectError = "Couldn't check for updates: ${error.reason()}"
+            }
+        }
+    }
+
+    /** Hides the notice until a later version than this one is out. */
+    fun dismissUpdate() {
+        update?.let { updates.dismissed = it.version }
+        update = null
+    }
+
     override fun onCleared() {
         session?.close()
+    }
+
+    private companion object {
+        const val UPDATE_INTERVAL = 12L * 60 * 60 * 1000
     }
 }

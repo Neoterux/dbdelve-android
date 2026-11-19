@@ -19,6 +19,11 @@ when Android asks). It needs a 64-bit ARM phone on Android 12 or later.
 What changed in each version is in [CHANGELOG.md](CHANGELOG.md), and in the
 app under **What's new**.
 
+The app asks GitHub for the latest release (at most twice a day, nothing sent
+but the request itself) and shows a notice with a download link when a newer
+one is out; turn this off under **Check automatically** in the menu. An APK
+updates the installed app only when both are signed with the same key.
+
 ## Target
 
 64-bit ARM phones on Android 12 or later.

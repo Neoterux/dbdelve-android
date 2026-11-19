@@ -5,6 +5,14 @@ Every user-visible change, newest first. The app shows this file under
 reading the code. Add to *Unreleased* with each change; a release renames it
 to its version and date.
 
+## Unreleased
+
+### Added
+
+- Tells you when a newer version is out on the Releases page, with a link to
+  download it. It checks at most twice a day; **Check for updates** in the
+  menu asks right away, and **Check automatically** turns the checks off.
+
 ## 0.2.0 (2026-11-19)
 
 ### Changed
