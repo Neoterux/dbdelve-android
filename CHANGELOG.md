@@ -12,6 +12,23 @@ to its version and date.
 - Tells you when a newer version is out on the Releases page, with a link to
   download it. It checks at most twice a day; **Check for updates** in the
   menu asks right away, and **Check automatically** turns the checks off.
+- A query builder beside the SQL editor: choose a table, tap the columns,
+  add filters (=, ≠, <, ≤, >, ≥, like, is null, not null), a sort and a
+  limit, and see the exact statement before it runs. Run it, open it as SQL
+  in a tab, or save it as a saved query whose filter values are asked for at
+  each run. From the schema, **Build a query** starts it on that table.
+- A tab switcher: the tab count beside the editor opens every query tab as a
+  card, with its text and whether it ran, returned an error or hasn't run.
+
+### Changed
+
+- Query tabs are chips that show whether each one ran or failed, and the
+  open one stays in view.
+- Icons throughout: the bottom bar, the editor's save, saved queries and row
+  limit, Grid and Cards in results, copy and share, the kind of each schema
+  object, and every action sheet. The bottom bar's Results shows the row
+  count, a dot while a statement runs, and ! after an error.
+- Cancel is now Stop.
 
 ## 0.2.0 (2026-11-19)
 
