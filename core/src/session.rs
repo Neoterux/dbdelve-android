@@ -263,7 +263,7 @@ impl Session {
                     })
                     .map(|row| {
                         // `::text` on a boolean spells it out: `true`, not the bare `t`.
-                        let flag = |at: usize| text(&row, at) == Some("true");
+                        let flag = |at: usize| text(row, at) == Some("true");
                         let mut attributes = Vec::new();
                         for (at, name) in [
                             (3, "create db"),
@@ -275,22 +275,22 @@ impl Session {
                                 attributes.push(name.to_owned());
                             }
                         }
-                        if let Some(limit) = text(&row, 7).filter(|limit| *limit != "-1") {
+                        if let Some(limit) = text(row, 7).filter(|limit| *limit != "-1") {
                             attributes.push(format!("{limit} connections"));
                         }
-                        if let Some(until) = text(&row, 8).filter(|until| !until.is_empty()) {
+                        if let Some(until) = text(row, 8).filter(|until| !until.is_empty()) {
                             attributes.push(format!("valid until {until}"));
                         }
                         DbUser {
                             account: Account {
-                                name: text(&row, 0).unwrap_or_default().to_owned(),
+                                name: text(row, 0).unwrap_or_default().to_owned(),
                                 host: String::new(),
                             },
                             can_login: flag(1),
                             superuser: flag(2),
                             attributes,
                             roles: serde_json::from_str::<Vec<String>>(
-                                text(&row, 9).unwrap_or("[]"),
+                                text(row, 9).unwrap_or("[]"),
                             )
                             .unwrap_or_default()
                             .into_iter()
@@ -372,7 +372,7 @@ impl Session {
                 Ok(rows
                     .iter()
                     .filter_map(|message| match message {
-                        SimpleQueryMessage::Row(row) => text(&row, 0).map(str::to_owned),
+                        SimpleQueryMessage::Row(row) => text(row, 0).map(str::to_owned),
                         _ => None,
                     })
                     .collect())
@@ -489,14 +489,14 @@ impl Session {
                     .iter()
                     .filter_map(|message| match message {
                         SimpleQueryMessage::Row(row) => Some(CatalogEntry {
-                            schema: text(&row, 0).unwrap_or_default().to_owned(),
-                            name: text(&row, 1).unwrap_or_default().to_owned(),
-                            kind: if matches!(text(&row, 2), Some("v" | "m")) {
+                            schema: text(row, 0).unwrap_or_default().to_owned(),
+                            name: text(row, 1).unwrap_or_default().to_owned(),
+                            kind: if matches!(text(row, 2), Some("v" | "m")) {
                                 ObjectKind::View
                             } else {
                                 ObjectKind::Table
                             },
-                            size_bytes: text(&row, 3).and_then(|size| size.parse().ok()),
+                            size_bytes: text(row, 3).and_then(|size| size.parse().ok()),
                         }),
                         _ => None,
                     })
@@ -706,7 +706,7 @@ fn connect_postgres(config: &ConnectionConfig) -> Result<(Driver, Canceller), Co
         .map_err(|error| connect_error(postgres_error(error)))?
         .iter()
         .find_map(|message| match message {
-            SimpleQueryMessage::Row(row) => text(&row, 0).and_then(|pid| pid.parse().ok()),
+            SimpleQueryMessage::Row(row) => text(row, 0).and_then(|pid| pid.parse().ok()),
             _ => None,
         })
         .ok_or_else(|| {
