@@ -16,8 +16,8 @@ android {
         // to this: the core is linked against that release's libc.
         minSdk = 31
         targetSdk = 35
-        versionCode = 5
-        versionName = "0.5.0"
+        versionCode = 6
+        versionName = "0.6.0"
         ndk {
             // 64-bit ARM only. No x86_64, so no emulator: test on a phone.
             abiFilters += listOf("arm64-v8a")
@@ -156,6 +156,8 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.fragment:fragment-ktx:1.8.5")
+    // The in-app updater's background check and download (see update/Updater.kt).
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
     implementation("net.java.dev.jna:jna:5.14.0@aar")
 
     testImplementation(composeBom)

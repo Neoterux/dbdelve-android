@@ -375,10 +375,10 @@ fun ChangelogSheet(onDismiss: () -> Unit) {
     }
 }
 
-/** A newer release's own notes, from GitHub, and a link to its page. */
+/** A newer release's own notes, from GitHub, a link to its page, and Download (or Install). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ReleaseNotesSheet(release: Updates.Release, onDownload: () -> Unit, onDismiss: () -> Unit) {
+fun ReleaseNotesSheet(release: Updates.Release, actionLabel: String, onAction: () -> Unit, onDismiss: () -> Unit) {
     val uri = LocalUriHandler.current
     ModalBottomSheet(onDismissRequest = onDismiss) {
         SheetTitle("What's new in ${release.version}")
@@ -390,7 +390,7 @@ fun ReleaseNotesSheet(release: Updates.Release, onDownload: () -> Unit, onDismis
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).navigationBarsPadding(), horizontalArrangement = Arrangement.End) {
             TextButton(onClick = { runCatching { uri.openUri(release.page) } }) { Text("Open on GitHub") }
-            TextButton(onClick = onDownload) { Text("Download") }
+            TextButton(onClick = onAction) { Text(actionLabel) }
         }
     }
 }

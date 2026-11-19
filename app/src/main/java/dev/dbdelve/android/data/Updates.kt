@@ -18,9 +18,16 @@ object Updates {
 
     /**
      * A published release: its version without the `v`, its page, its APK,
-     * and its notes (the release's body, Markdown: the changelog's section).
+     * its notes (the release's body, Markdown: the changelog's section), and
+     * the APK's SHA-256 as GitHub computed it on upload, when it gives one.
      */
-    data class Release(val version: String, val page: String, val apk: String?, val notes: String = "") {
+    data class Release(
+        val version: String,
+        val page: String,
+        val apk: String?,
+        val notes: String = "",
+        val sha256: String? = null,
+    ) {
         /** Where Download goes: the APK itself, or the page when it has none. */
         val download: String get() = apk ?: page
     }
@@ -57,19 +64,23 @@ object Updates {
         val version = release.optString("tag_name").removePrefix("v").trim()
         if (parts(version) == null) return null
         val assets = release.optJSONArray("assets")
-        val apk = assets?.let { array ->
+        val asset = assets?.let { array ->
             (0 until array.length())
                 .map { array.getJSONObject(it) }
                 .firstOrNull { it.optString("name").endsWith(".apk", ignoreCase = true) }
-                ?.optString("browser_download_url")
-                ?.takeIf { it.startsWith("https://") }
         }
+        val apk = asset?.optString("browser_download_url")?.takeIf { it.startsWith("https://") }
+        // "sha256:<hex>", on assets uploaded since GitHub began computing it.
+        val sha256 = asset?.optString("digest")
+            ?.takeIf { it.startsWith("sha256:", ignoreCase = true) }
+            ?.substring(7)?.lowercase()
+            ?.takeIf { it.length == 64 && it.all { c -> c in '0'..'9' || c in 'a'..'f' } }
         val page = release.optString("html_url").takeIf { it.startsWith("https://") }
             ?: "https://github.com/Neoterux/dbdelve-android/releases/latest"
         // The notes are shown as text, never as a page: no HTML, no links
         // followed. Capped, since a release body has no length limit.
         val notes = release.optString("body").replace("\r\n", "\n").trim().take(NOTES_CHARS)
-        return Release(version, page, apk, notes)
+        return Release(version, page, apk, notes, sha256?.takeIf { apk != null })
     }
 
     /**

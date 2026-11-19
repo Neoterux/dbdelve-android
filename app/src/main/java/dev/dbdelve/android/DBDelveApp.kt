@@ -7,6 +7,7 @@ import dev.dbdelve.android.data.SavedQueryStore
 import dev.dbdelve.android.data.Secrets
 import dev.dbdelve.android.data.TabStore
 import dev.dbdelve.android.data.UpdateStore
+import dev.dbdelve.android.update.Updater
 import java.io.File
 
 /**
@@ -16,6 +17,14 @@ import java.io.File
  * the statement outlive any screen.
  */
 class DBDelveApp : Application() {
+    private val installedVersion get() = packageManager.getPackageInfo(packageName, 0).versionName ?: "0"
+
+    override fun onCreate() {
+        super.onCreate()
+        // The updater's channels and daily check, and an APK already downloaded.
+        Updater.init(this, UpdateStore(this), installedVersion)
+    }
+
     val model: AppViewModel by lazy {
         AppViewModel(
             ProfileStore(filesDir),
@@ -24,7 +33,7 @@ class DBDelveApp : Application() {
             SavedQueryStore(filesDir),
             HistoryStore(File(filesDir, "history")),
             UpdateStore(this),
-            packageManager.getPackageInfo(packageName, 0).versionName ?: "0",
+            installedVersion,
             File(noBackupFilesDir, "tls"),
         ) { connection ->
             QueryService.keepAlive(this, connection)

@@ -27,10 +27,10 @@ import kotlinx.coroutines.launch
  * It stops itself, after entering the foreground, once [running] clears.
  * Stopping it from outside could land before `startForeground`, which
  * Android punishes by crashing the app, and most statements finish in
- * milliseconds. The app never asks for the notification permission, so from
- * Android 13 on the notification stays out of the shade. Android 12 has no
- * such permission and shows it, but holds a new one back for ten seconds, so
- * a quick statement still shows nothing.
+ * milliseconds. Android holds a foreground service's notification back for
+ * ten seconds, so a quick statement shows nothing; a long one shows it,
+ * except from Android 13 on when the notification permission (asked for only
+ * at an update's first Download) was not granted.
  */
 class QueryService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)

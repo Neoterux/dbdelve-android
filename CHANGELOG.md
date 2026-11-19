@@ -5,6 +5,23 @@ Every user-visible change, newest first. The app shows this file under
 reading the code. Add to *Unreleased* with each change; a release renames it
 to its version and date.
 
+## 0.6.0 (2026-11-19)
+
+### Added
+
+- Updates install from inside the app. **Download** on the update notice
+  now fetches the new version itself, with its progress in the notice and a
+  notification (Cancel stops it), then **Install** hands it to Android's
+  installer, which asks before replacing the app. Before that the app checks
+  the download: GitHub's published checksum, that it is DBDelve, newer than
+  yours, and signed with the same key, so a file Android would refuse is
+  caught with a clear reason instead.
+- A daily check in the background while **Check automatically** is on: a
+  notification says when a new version is out, with Download right in it;
+  tap it to read what's new. Android 13 and later ask for the notification
+  permission at your first Download; without it the notice in the app shows
+  the same.
+
 ## 0.5.0 (2026-11-19)
 
 ### Added
