@@ -72,18 +72,21 @@ val uniffiBindings by tasks.registering(Exec::class) {
     commandLine(
         "cargo", "run", "--quiet", "--bin", "uniffi-bindgen", "--",
         "generate",
-        "--library", jniLibsDir.get().file("arm64-v8a/libdbdelve_core.so").asFile.absolutePath,
+        // The copy in Cargo's own target directory: cargo-ndk strips the one
+        // it writes to jniLibs, and that is right for the APK but leaves
+        // bindgen nothing to read.
+        "--library", coreDir.resolve("target/aarch64-linux-android/release/libdbdelve_core.so").absolutePath,
         "--language", "kotlin",
         "--no-format",
         "--out-dir", bindingsDir.get().asFile.absolutePath,
     )
     inputs.dir(jniLibsDir)
     outputs.dir(bindingsDir)
-    // A library stripped of its symbols makes bindgen write nothing and exit
-    // happily, and the build then fails far away, on every type it names.
+    // A stripped library makes bindgen write nothing and exit happily, and
+    // the build then fails far away, on every type it names.
     doLast {
         check(bindingsDir.get().asFile.walk().any { it.extension == "kt" }) {
-            "uniffi-bindgen generated no Kotlin: is libdbdelve_core.so stripped of its symbols?"
+            "uniffi-bindgen generated no Kotlin: was it given a stripped libdbdelve_core.so?"
         }
     }
 }
