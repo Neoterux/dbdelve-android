@@ -30,6 +30,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.CallSplit
+import androidx.compose.material.icons.filled.Functions
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
@@ -58,9 +60,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -76,10 +80,11 @@ import dev.dbdelve.android.reason
 import uniffi.dbdelve_core.Engine
 import uniffi.dbdelve_core.FilterOp
 import uniffi.dbdelve_core.fillParameters
+import uniffi.dbdelve_core.Column as DbColumn
 
 /**
- * A query made by tapping: a table, its columns, filters, a sort and a
- * limit. It writes the statement on screen as it goes; Run and Edit as SQL
+ * A query made by tapping: a table, its columns, filters in AND groups
+ * joined by OR, a count or grouping, a sort and a limit. No joins. It writes the statement on screen as it goes; Run and Edit as SQL
  * both put that statement in a tab of its own.
  */
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
@@ -107,31 +112,72 @@ fun QueryBuilder(model: AppViewModel) {
             } else {
                 state.columnsError?.let { Text(it, color = LocalPalette.current.red, fontFamily = Mono, fontSize = 12.sp) }
                 Section(Icons.Default.ViewColumn, "Columns")
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    FilterChip(selected = state.chosen.isEmpty(), onClick = { state.chosen.clear() }, label = { Text("All") })
-                    state.columns.forEach { column ->
-                        val on = column.name in state.chosen
-                        FilterChip(
-                            selected = on,
-                            onClick = { if (on) state.chosen.remove(column.name) else state.chosen.add(column.name) },
-                            label = { Text(column.name, fontFamily = Mono, fontSize = 12.sp) },
-                        )
+                if (state.aggregates) {
+                    Text(
+                        "Grouped or counted: the result's columns are the groups and the count.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        FilterChip(selected = state.chosen.isEmpty(), onClick = { state.chosen.clear() }, label = { Text("All") })
+                        state.columns.forEach { column ->
+                            val on = column.name in state.chosen
+                            FilterChip(
+                                selected = on,
+                                onClick = { if (on) state.chosen.remove(column.name) else state.chosen.add(column.name) },
+                                label = { Text(column.name, fontFamily = Mono, fontSize = 12.sp) },
+                            )
+                        }
                     }
                 }
                 if (state.loadingColumns) Text("Reading columns…", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
                 Section(Icons.Default.FilterAlt, "Filters")
-                state.filters.forEach { filter -> FilterCard(state, filter, engine) }
-                AssistChip(
-                    onClick = { state.filters.add(BuilderFilter(state.columns.firstOrNull()?.name.orEmpty())) },
-                    label = { Text("Add filter") },
-                    leadingIcon = { Icon(Icons.Default.Add, null, Modifier.size(18.dp)) },
-                )
+                state.groups.forEachIndexed { at, group ->
+                    if (at > 0) OrDivider()
+                    group.forEach { filter -> FilterCard(state, group, filter, engine) }
+                    AssistChip(
+                        onClick = { group.add(BuilderFilter(state.columns.firstOrNull()?.name.orEmpty())) },
+                        label = { Text(if (group.isEmpty()) "Add filter" else "And…") },
+                        leadingIcon = { Icon(Icons.Default.Add, null, Modifier.size(18.dp)) },
+                    )
+                }
+                if (state.groups.last().isNotEmpty()) {
+                    AssistChip(
+                        onClick = { state.groups.add(mutableStateListOf(BuilderFilter(state.columns.firstOrNull()?.name.orEmpty()))) },
+                        label = { Text("Or…") },
+                        leadingIcon = { Icon(Icons.Default.CallSplit, null, Modifier.size(18.dp)) },
+                    )
+                }
+
+                Section(Icons.Default.Functions, "Summarize")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    FilterChip(
+                        selected = state.count,
+                        onClick = { state.count = !state.count },
+                        label = { Text("Count rows") },
+                        leadingIcon = { Icon(Icons.Default.Numbers, null, Modifier.size(16.dp)) },
+                    )
+                }
+                Text("Group by", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    // MongoDB reads `a.b` and `$a` as paths, not names: those
+                    // fields are not offered to group by.
+                    state.columns.filter { engine != Engine.MONGO || ('.' !in it.name && !it.name.startsWith('$')) }.forEach { column ->
+                        val on = column.name in state.groupBy
+                        FilterChip(
+                            selected = on,
+                            onClick = { if (on) state.groupBy.remove(column.name) else state.groupBy.add(column.name) },
+                            label = { Text(column.name, fontFamily = Mono, fontSize = 12.sp) },
+                        )
+                    }
+                }
 
                 Section(Icons.AutoMirrored.Filled.Sort, "Sort")
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    ColumnMenu(state, state.orderBy, none = "Unsorted") { state.orderBy = it }
-                    if (state.orderBy != null) {
+                    ColumnMenu(state.sortable(), state.columns, state.orderBy?.takeIf { it in state.sortable() }, none = "Unsorted") { state.orderBy = it }
+                    if (state.orderBy != null && state.orderBy in state.sortable()) {
                         FilledTonalIconButton(onClick = { state.descending = !state.descending }) {
                             Icon(
                                 if (state.descending) Icons.Default.ArrowDownward else Icons.Default.ArrowUpward,
@@ -240,7 +286,16 @@ private fun Section(icon: ImageVector, title: String) {
 }
 
 @Composable
-private fun FilterCard(state: BuilderState, filter: BuilderFilter, engine: Engine) {
+private fun OrDivider() {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        HorizontalDivider(Modifier.weight(1f))
+        Text("OR", style = MaterialTheme.typography.labelMedium, color = LocalPalette.current.blue, fontWeight = FontWeight.Bold)
+        HorizontalDivider(Modifier.weight(1f))
+    }
+}
+
+@Composable
+private fun FilterCard(state: BuilderState, group: SnapshotStateList<BuilderFilter>, filter: BuilderFilter, engine: Engine) {
     Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = RoundedCornerShape(10.dp)) {
         Column(Modifier.fillMaxWidth().padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -255,41 +310,61 @@ private fun FilterCard(state: BuilderState, filter: BuilderFilter, engine: Engin
                         modifier = Modifier.weight(1f),
                     )
                 } else {
-                    Box(Modifier.weight(1f)) { ColumnMenu(state, filter.column, none = null) { filter.column = it.orEmpty() } }
+                    Box(Modifier.weight(1f)) {
+                        ColumnMenu(state.columns.map { it.name }, state.columns, filter.column, none = null) { filter.column = it.orEmpty() }
+                    }
                 }
                 OpMenu(filter, engine)
-                IconButton(onClick = { state.filters.remove(filter) }) { Icon(Icons.Default.Close, contentDescription = "Remove filter") }
+                IconButton(onClick = { state.removeFilter(group, filter) }) { Icon(Icons.Default.Close, contentDescription = "Remove filter") }
             }
-            if (filter.takesValue) {
+            filter.values.forEachIndexed { at, value ->
+                val label = when (filter.op) {
+                    FilterOp.BETWEEN -> if (at == 0) "from" else "to"
+                    else -> null
+                }
                 OutlinedTextField(
-                    value = filter.value,
-                    onValueChange = { filter.value = it },
-                    placeholder = { Text(if (filter.op == FilterOp.LIKE) likeHint(engine) else "value") },
+                    value = value,
+                    onValueChange = { filter.values[at] = it },
+                    label = label?.let { { Text(it) } },
+                    placeholder = { Text(if (filter.isPattern) likeHint(engine) else "value") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(
-                        keyboardType = if (filter.asNumber == true && filter.op != FilterOp.LIKE) KeyboardType.Decimal else KeyboardType.Text,
+                        keyboardType = if (filter.asNumber == true && !filter.isPattern) KeyboardType.Decimal else KeyboardType.Text,
                         autoCorrectEnabled = false,
                     ),
                     trailingIcon = {
-                        if (filter.op != FilterOp.LIKE) {
-                            // Text or number decides the literal: '5' and 5 differ on MongoDB.
-                            IconButton(onClick = { filter.asNumber = !filter.isNumber }) {
-                                Icon(
-                                    if (filter.isNumber) Icons.Default.Numbers else Icons.Default.TextFields,
-                                    contentDescription = if (filter.isNumber) "Number, tap for text" else "Text, tap for number",
-                                )
+                        Row {
+                            if (filter.op == FilterOp.IN && filter.values.size > 1) {
+                                IconButton(onClick = { filter.values.removeAt(at) }) { Icon(Icons.Default.Close, contentDescription = "Remove value") }
+                            }
+                            if (!filter.isPattern && at == 0) {
+                                // Text or number decides the literal: '5' and 5 differ on MongoDB.
+                                IconButton(onClick = { filter.asNumber = !filter.isNumber }) {
+                                    Icon(
+                                        if (filter.isNumber) Icons.Default.Numbers else Icons.Default.TextFields,
+                                        contentDescription = if (filter.isNumber) "Number, tap for text" else "Text, tap for number",
+                                    )
+                                }
                             }
                         }
                     },
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
+            if (filter.op == FilterOp.IN) {
+                AssistChip(
+                    onClick = { filter.values.add("") },
+                    label = { Text("Another value") },
+                    leadingIcon = { Icon(Icons.Default.Add, null, Modifier.size(18.dp)) },
+                )
+            }
         }
     }
 }
 
+/** A menu of [names]; types come from [columns] where one matches. */
 @Composable
-private fun ColumnMenu(state: BuilderState, chosen: String?, none: String?, choose: (String?) -> Unit) {
+private fun ColumnMenu(names: List<String>, columns: List<DbColumn>, chosen: String?, none: String?, choose: (String?) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
         AssistChip(
@@ -299,15 +374,16 @@ private fun ColumnMenu(state: BuilderState, chosen: String?, none: String?, choo
         )
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             none?.let { DropdownMenuItem(text = { Text(it) }, onClick = { choose(null); open = false }) }
-            state.columns.forEach { column ->
+            names.forEach { name ->
+                val type = columns.firstOrNull { it.name == name }?.typeTag.orEmpty()
                 DropdownMenuItem(
                     text = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(column.name, fontFamily = Mono, fontSize = 13.sp)
-                            if (column.typeTag.isNotEmpty()) Text("  ${column.typeTag}", fontFamily = Mono, fontSize = 10.sp, color = LocalPalette.current.faint)
+                            Text(name, fontFamily = Mono, fontSize = 13.sp)
+                            if (type.isNotEmpty()) Text("  $type", fontFamily = Mono, fontSize = 10.sp, color = LocalPalette.current.faint)
                         }
                     },
-                    onClick = { choose(column.name); open = false },
+                    onClick = { choose(name); open = false },
                 )
             }
         }
@@ -341,6 +417,13 @@ private fun FilterOp.symbol(engine: Engine): String = when (this) {
     FilterOp.GREATER -> ">"
     FilterOp.GREATER_OR_EQUAL -> "≥"
     FilterOp.LIKE -> if (engine == Engine.MONGO) "regex" else "like"
+    FilterOp.LIKE_IGNORING_CASE -> when (engine) {
+        Engine.POSTGRES -> "ilike"
+        Engine.MY_SQL -> "like, any case"
+        Engine.MONGO -> "regex, any case"
+    }
+    FilterOp.IN -> "in"
+    FilterOp.BETWEEN -> "between"
     FilterOp.IS_NULL -> "is null"
     FilterOp.NOT_NULL -> "not null"
 }

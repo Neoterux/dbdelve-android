@@ -23,6 +23,11 @@ use crate::{ConnectionConfig, CoreError, Engine, SslMode};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How many MongoDB documents the builder reads fields from: enough that a
+/// field most documents lack still shows, few enough to stay quick on a
+/// phone. `$sample` picks them at random without scanning the collection.
+const COLUMN_SAMPLE: i32 = 100;
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Column {
     pub name: String,
@@ -556,7 +561,8 @@ impl Session {
     }
 
     /// An object's columns, in table order, for the query builder. MongoDB
-    /// has no schema, so there it is the fields of one document.
+    /// has no schema, so there it is every field found in a random sample of
+    /// [`COLUMN_SAMPLE`] documents, in the order they first appear.
     pub fn columns(&self, schema: String, name: String) -> Result<Vec<Column>, CoreError> {
         let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *driver {
@@ -592,25 +598,16 @@ impl Session {
                     .collect())
             }
             Driver::Mongo { runtime, database } => {
-                let first = runtime
+                let sample = runtime
                     .block_on(async {
-                        database
+                        let cursor = database
                             .collection::<Document>(&name)
-                            .find_one(Document::new())
-                            .await
+                            .aggregate([bson::doc! { "$sample": { "size": COLUMN_SAMPLE } }])
+                            .await?;
+                        cursor.try_collect::<Vec<Document>>().await
                     })
                     .map_err(query_error)?;
-                Ok(first
-                    .map(|document| {
-                        document
-                            .keys()
-                            .map(|key| Column {
-                                name: key.clone(),
-                                type_tag: String::new(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default())
+                Ok(sampled_columns(&sample))
             }
         }
     }
@@ -1249,25 +1246,7 @@ async fn documents(
 }
 
 fn rows_of(read: Vec<Document>, capped: bool) -> ResultSet {
-    let mut columns: Vec<Column> = Vec::new();
-    for document in &read {
-        for (key, value) in document {
-            match columns.iter_mut().find(|column| &column.name == key) {
-                Some(column) if column.type_tag.is_empty() && *value != Bson::Null => {
-                    column.type_tag = bson_type(value);
-                }
-                Some(_) => {}
-                None => columns.push(Column {
-                    name: key.clone(),
-                    type_tag: if *value == Bson::Null {
-                        String::new()
-                    } else {
-                        bson_type(value)
-                    },
-                }),
-            }
-        }
-    }
+    let columns = sampled_columns(&read);
     let rows = read
         .iter()
         .map(|document| {
@@ -1288,6 +1267,30 @@ fn rows_of(read: Vec<Document>, capped: bool) -> ResultSet {
         affected: None,
         elapsed_ms: 0,
     }
+}
+
+/// Each top-level field the documents hold, as result columns or the
+/// builder's, in the order fields first
+/// appear, typed by the first value that is not null.
+fn sampled_columns(documents: &[Document]) -> Vec<Column> {
+    let mut columns: Vec<Column> = Vec::new();
+    for document in documents {
+        for (key, value) in document {
+            let tag = match value {
+                Bson::Null => String::new(),
+                value => bson_type(value),
+            };
+            match columns.iter_mut().find(|column| &column.name == key) {
+                Some(column) if column.type_tag.is_empty() => column.type_tag = tag,
+                Some(_) => {}
+                None => columns.push(Column {
+                    name: key.clone(),
+                    type_tag: tag,
+                }),
+            }
+        }
+    }
+    columns
 }
 
 fn bson_type(value: &Bson) -> String {

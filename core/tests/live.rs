@@ -704,3 +704,217 @@ fn live_mongo_tls_private_ca() {
     };
     trusts_only_with_the_ca(config, &certs.join("ca.pem"));
 }
+
+/// Runs a statement in Full, whatever it is: test setup, not the gate's test.
+fn setup(session: &Session, text: &str) {
+    let outcome = session
+        .run(
+            text.into(),
+            1000,
+            vec![
+                Destructive::Drop,
+                Destructive::UnfilteredDelete,
+                Destructive::Truncate,
+            ],
+            true,
+            Some(Mode::Full),
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, RunOutcome::Done { .. }),
+        "{text}: {outcome:?}"
+    );
+}
+
+/// The builder's statement, filled with `values` (a text, or a number when it
+/// reads as one) in parameter order, and run.
+fn built(
+    session: &Session,
+    spec: &dbdelve_core::QuerySpec,
+    values: &[&str],
+) -> dbdelve_core::ResultSet {
+    use dbdelve_core::{Binding, ParamValue};
+    let engine = session.engine();
+    let query = dbdelve_core::build_query(engine, spec.clone());
+    let names: Vec<String> = query.parameters.iter().flatten().cloned().collect();
+    assert_eq!(names.len(), values.len(), "{}", query.text);
+    let bindings = names
+        .into_iter()
+        .zip(values)
+        .map(|(name, value)| Binding {
+            name,
+            value: if value.parse::<f64>().is_ok() {
+                ParamValue::Number {
+                    value: (*value).into(),
+                }
+            } else {
+                ParamValue::Text {
+                    value: (*value).into(),
+                }
+            },
+        })
+        .collect();
+    let filled = dbdelve_core::fill_parameters(engine, query.text, bindings).unwrap();
+    match session
+        .run(filled.clone(), 1000, Vec::new(), false, None)
+        .unwrap()
+    {
+        RunOutcome::Done { result } => result,
+        stopped => panic!("{filled}: {stopped:?}"),
+    }
+}
+
+/// IN, BETWEEN, a case-insensitive match and OR groups, a count, and a count
+/// per group, run on the server; and on MongoDB, a field only one document
+/// in a hundred holds still shows among the builder's columns.
+fn builder_runs(session: &Session, schema: &str, table: &str, starts_with_an: &str) {
+    use dbdelve_core::{Filter, FilterOp, QuerySpec};
+    let filter = |column: &str, op, values| Filter {
+        column: column.into(),
+        op,
+        values,
+    };
+    let base = QuerySpec {
+        schema: schema.into(),
+        table: table.into(),
+        columns: vec!["id".into()],
+        groups: Vec::new(),
+        count: false,
+        group_by: Vec::new(),
+        order_by: Some("id".into()),
+        descending: false,
+        limit: None,
+    };
+    let either = QuerySpec {
+        groups: vec![
+            vec![
+                filter("status", FilterOp::In, 2),
+                filter("total", FilterOp::Between, 0),
+            ],
+            vec![filter("name", FilterOp::LikeIgnoringCase, 0)],
+        ],
+        ..base.clone()
+    };
+    let ids: Vec<String> = built(
+        session,
+        &either,
+        &["paid", "shipped", "15", "45", starts_with_an],
+    )
+    .rows
+    .into_iter()
+    .map(|row| row[0].clone().unwrap())
+    .collect();
+    assert_eq!(ids, ["1", "2", "3", "4"]);
+
+    let per_status = QuerySpec {
+        count: true,
+        group_by: vec!["status".into()],
+        order_by: Some("status".into()),
+        ..base.clone()
+    };
+    let result = built(session, &per_status, &[]);
+    let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["status", "count"]);
+    let rows: Vec<(String, String)> = result
+        .rows
+        .into_iter()
+        .map(|row| (row[0].clone().unwrap(), row[1].clone().unwrap()))
+        .collect();
+    let expected = [("open", "2"), ("paid", "2"), ("shipped", "1")];
+    assert_eq!(rows, expected.map(|(a, b)| (a.to_owned(), b.to_owned())));
+
+    let all = QuerySpec {
+        count: true,
+        order_by: None,
+        ..base
+    };
+    assert_eq!(built(session, &all, &[]).rows, [[Some("5".to_owned())]]);
+}
+
+#[test]
+#[ignore]
+fn live_builder_postgres() {
+    let Some(config) = config(
+        Engine::Postgres,
+        "DBDELVE_ANDROID_POSTGRES",
+        SslMode::Disable,
+    ) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_built");
+    setup(
+        &session,
+        "CREATE TABLE android_built (id int PRIMARY KEY, status text, total numeric, name text)",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_built VALUES (1, 'paid', 10, 'Ana'), (2, 'open', 20, 'ana'), \
+         (3, 'paid', 30, 'Bob'), (4, 'shipped', 40, 'Cy'), (5, 'open', 50, 'Dee')",
+    );
+    builder_runs(&session, "public", "android_built", "an%");
+    setup(&session, "DROP TABLE android_built");
+}
+
+#[test]
+#[ignore]
+fn live_builder_mysql() {
+    let Some(config) = config(Engine::MySql, "DBDELVE_ANDROID_MYSQL", SslMode::Disable) else {
+        return;
+    };
+    let database = config.database.clone();
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_built");
+    // A binary collation, which does not ignore case by itself.
+    setup(
+        &session,
+        "CREATE TABLE android_built (id int PRIMARY KEY, status varchar(20), total decimal(10,2), \
+         name varchar(20) CHARACTER SET utf8 COLLATE utf8_bin)",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_built VALUES (1, 'paid', 10, 'Ana'), (2, 'open', 20, 'ana'), \
+         (3, 'paid', 30, 'Bob'), (4, 'shipped', 40, 'Cy'), (5, 'open', 50, 'Dee')",
+    );
+    builder_runs(&session, &database, "android_built", "an%");
+    setup(&session, "DROP TABLE android_built");
+}
+
+#[test]
+#[ignore]
+fn live_builder_mongo() {
+    let Some(config) = config(Engine::Mongo, "DBDELVE_ANDROID_MONGO", SslMode::Disable) else {
+        return;
+    };
+    let database = config.database.clone();
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "db.android_built.drop()");
+    setup(
+        &session,
+        "db.android_built.insertMany([{_id: 1, id: 1, status: 'paid', total: 10, name: 'Ana'}, \
+         {_id: 2, id: 2, status: 'open', total: 20, name: 'ana'}, {_id: 3, id: 3, status: 'paid', total: 30, name: 'Bob'}, \
+         {_id: 4, id: 4, status: 'shipped', total: 40, name: 'Cy'}, {_id: 5, id: 5, status: 'open', total: 50, name: 'Dee'}])",
+    );
+    builder_runs(&session, &database, "android_built", "^an");
+
+    // One document in a hundred has `rare`; one document never was enough.
+    setup(&session, "db.android_sampled.drop()");
+    let many: Vec<String> = (0..99).map(|n| format!("{{n: {n}}}")).collect();
+    setup(
+        &session,
+        &format!("db.android_sampled.insertMany([{}])", many.join(", ")),
+    );
+    setup(
+        &session,
+        "db.android_sampled.insertOne({n: 99, rare: true})",
+    );
+    let columns: Vec<String> = session
+        .columns(database, "android_sampled".into())
+        .unwrap()
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(columns, ["_id", "n", "rare"]);
+    setup(&session, "db.android_sampled.drop()");
+    setup(&session, "db.android_built.drop()");
+}

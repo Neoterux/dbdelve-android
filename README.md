@@ -37,6 +37,10 @@ Drawn by `ScreensTest` from the app's own screens, connected to a Postgres
 |---|---|---|---|
 | ![Tables and views with their sizes](screenshots/schema.png) | ![The builder: columns, two filters, and the statement it writes pinned above Run](screenshots/builder.png) | ![The built query's rows](screenshots/builder-results.png) | ![The built statement in a tab of its own](screenshots/built-tab.png) |
 
+| IN and an OR group | Count per group | Counted rows |
+|---|---|---|
+| ![An IN filter with two values, and a second group joined by OR](screenshots/builder-or.png) | ![Count rows, grouped by status, sorted by the count](screenshots/builder-count.png) | ![One row per status with its count](screenshots/count-results.png) |
+
 ## Target
 
 64-bit ARM phones on Android 12 or later.
@@ -319,8 +323,27 @@ thing that stops a write. Use a read-only role for anything that matters.
 
 **Builder**, beside **SQL** at the top of the Query screen, makes a query by
 tapping: choose a table (or **Build a query** on one in Schema), tap its
-columns, add filters (=, ≠, <, ≤, >, ≥, like, is null, not null), a sort and
-a limit. The statement it writes stays on screen above **Run** as it changes.
+columns, add filters (=, ≠, <, ≤, >, ≥, like, like ignoring case, in,
+between, is null, not null), a sort and a limit. The statement it writes stays
+on screen above **Run** as it changes.
+
+- **And, or.** Filters in one group must all hold; **Or…** starts another
+  group, and a row matches if any group does: `(a AND b) OR (c)`.
+- **Ignoring case** is `ILIKE` on Postgres, `LOWER(…) LIKE LOWER(…)` on
+  MySQL (whose collation may already ignore case, or may not), and a regular
+  expression with the `i` option on MongoDB.
+- **In** takes as many values as you list; **between** takes a from and a to,
+  both included.
+- **Count rows**, and **Group by** one or more columns, answer "how many":
+  one row per group with its `count`, sortable by either. On MongoDB this is
+  a `$group` pipeline; fields named with a `.` or a leading `$` read as paths
+  there, so they are not offered to group by.
+- **No joins.** They are where tapping gets worse than typing; write those in
+  the SQL editor.
+
+On MongoDB the columns to choose from are every field found in a random
+sample of 100 documents (`$sample`), so a field most documents lack still
+shows.
 
 The core writes the statement (`core/src/builder.rs`), quoting every name in
 the engine's own way, and every value typed into a filter becomes a `:name`

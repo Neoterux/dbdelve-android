@@ -17,10 +17,13 @@ to its version and date.
 - Client certificates, for servers that admit users by certificate. The key is
   sealed by the phone's Keystore, like passwords.
 - A query builder beside the SQL editor: choose a table, tap the columns,
-  add filters (=, ≠, <, ≤, >, ≥, like, is null, not null), a sort and a
-  limit, and see the exact statement before it runs. Run it, open it as SQL
+  add filters (=, ≠, <, ≤, >, ≥, like, like ignoring case, in, between, is
+  null, not null) in groups joined by OR, count rows or count them per group,
+  a sort and a limit, and see the exact statement before it runs. Run it, open it as SQL
   in a tab, or save it as a saved query whose filter values are asked for at
-  each run. From the schema, **Build a query** starts it on that table.
+  each run. From the schema, **Build a query** starts it on that table. On
+  MongoDB its columns come from a sample of 100 documents, so fields only
+  some documents hold are there too.
 - A tab switcher: the tab count beside the editor opens every query tab as a
   card, with its text and whether it ran, returned an error or hasn't run.
 

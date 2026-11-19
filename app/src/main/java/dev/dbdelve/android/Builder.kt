@@ -4,6 +4,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import uniffi.dbdelve_core.Binding
 import uniffi.dbdelve_core.BuiltQuery
 import uniffi.dbdelve_core.CatalogEntry
@@ -15,19 +16,45 @@ import uniffi.dbdelve_core.buildQuery
 import uniffi.dbdelve_core.Column as DbColumn
 import uniffi.dbdelve_core.Filter as DbFilter
 
-/** One filter row: a column, how it compares, and the value typed for it. */
+/** One filter row: a column, how it compares, and the values typed for it. */
 class BuilderFilter(column: String) {
     var column by mutableStateOf(column)
-    var op by mutableStateOf(FilterOp.EQUALS)
-    var value by mutableStateOf("")
+    private var _op by mutableStateOf(FilterOp.EQUALS)
 
-    /** Null until the user picks: then a value that reads as a number is one. */
+    /** One value for most; from and to for between; as many as listed for in. */
+    val values = mutableStateListOf("")
+
+    var op: FilterOp
+        get() = _op
+        set(next) {
+            _op = next
+            val wanted = when (next) {
+                FilterOp.IS_NULL, FilterOp.NOT_NULL -> 0
+                FilterOp.BETWEEN -> 2
+                FilterOp.IN -> values.size.coerceAtLeast(1)
+                else -> 1
+            }
+            while (values.size < wanted) values.add("")
+            while (values.size > wanted) values.removeAt(values.lastIndex)
+        }
+
+    /** The first value: the only one, for most comparisons. */
+    var value: String
+        get() = values.firstOrNull().orEmpty()
+        set(text) {
+            if (values.isEmpty()) values.add(text) else values[0] = text
+        }
+
+    /** Null until the user picks: then values that all read as numbers are numbers. */
     var asNumber by mutableStateOf<Boolean?>(null)
 
     val takesValue: Boolean get() = op != FilterOp.IS_NULL && op != FilterOp.NOT_NULL
 
-    /** A pattern is always text; otherwise the user's pick, or what the value looks like. */
-    val isNumber: Boolean get() = op != FilterOp.LIKE && (asNumber ?: NUMBER.matches(value.trim()))
+    val isPattern: Boolean get() = op == FilterOp.LIKE || op == FilterOp.LIKE_IGNORING_CASE
+
+    /** A pattern is always text; otherwise the user's pick, or what the values look like. */
+    val isNumber: Boolean
+        get() = !isPattern && (asNumber ?: values.all { NUMBER.matches(it.trim()) })
 
     private companion object {
         val NUMBER = Regex("""-?\d+(\.\d+)?([eE][+-]?\d+)?""")
@@ -46,33 +73,60 @@ class BuilderState(val table: CatalogEntry? = null) {
 
     /** Empty means every column. */
     val chosen = mutableStateListOf<String>()
-    val filters = mutableStateListOf<BuilderFilter>()
+
+    /** Filters in groups: all of one group's must hold, any group may. Never empty. */
+    val groups = mutableStateListOf(mutableStateListOf<BuilderFilter>())
+
+    /** The first group's filters, which is all of them until an OR is added. */
+    val filters: SnapshotStateList<BuilderFilter> get() = groups.first()
+
+    var count by mutableStateOf(false)
+    val groupBy = mutableStateListOf<String>()
     var orderBy by mutableStateOf<String?>(null)
     var descending by mutableStateOf(false)
     var limit by mutableStateOf<Int?>(null)
 
+    val aggregates: Boolean get() = count || groupBy.isNotEmpty()
+
+    /** What a sort can name: the result's columns, which grouping changes. */
+    fun sortable(): List<String> = if (aggregates) groupBy + listOfNotNull(COUNT.takeIf { count }) else columns.map { it.name }
+
+    fun removeFilter(group: SnapshotStateList<BuilderFilter>, filter: BuilderFilter) {
+        group.remove(filter)
+        if (group.isEmpty() && groups.size > 1) groups.remove(group)
+    }
+
     fun built(engine: Engine): BuiltQuery? {
         val table = table ?: return null
+        // A sort the result no longer has (grouping changed it) is dropped,
+        // not written: it would name a column the statement doesn't return.
+        val sort = orderBy?.takeIf { !aggregates || it in sortable() }
         return buildQuery(
             engine,
             QuerySpec(
                 schema = table.schema,
                 table = table.name,
                 columns = chosen.toList(),
-                filters = filters.map { DbFilter(it.column, it.op) },
-                orderBy = orderBy,
+                groups = groups.map { group -> group.map { DbFilter(it.column, it.op, it.values.size.toUInt()) } },
+                count = count,
+                groupBy = groupBy.toList(),
+                orderBy = sort,
                 descending = descending,
                 limit = limit?.toUInt(),
             ),
         )
     }
 
-    /** Each filter's value under the parameter the core named for it. */
+    /** Each filter's values under the parameters the core named for them. */
     fun bindings(built: BuiltQuery): List<Binding> =
-        filters.zip(built.parameters).filter { (filter, name) -> filter.takesValue && name.isNotEmpty() }.map { (filter, name) ->
-            Binding(
-                name,
-                if (filter.isNumber) ParamValue.Number(filter.value) else ParamValue.Text(filter.value),
-            )
+        groups.flatten().zip(built.parameters).flatMap { (filter, names) ->
+            names.zip(filter.values).map { (name, value) ->
+                Binding(name, if (filter.isNumber) ParamValue.Number(value) else ParamValue.Text(value))
+            }
         }
+
+    companion object {
+        /** The name the core gives a count, and a sort on it. */
+        const val COUNT = "count"
+    }
 }

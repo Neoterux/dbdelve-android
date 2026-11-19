@@ -130,6 +130,46 @@ class ScreensTest {
 
         compose.runOnIdle { model.pane = Pane.QUERY }
         shot("08-built-tab")
+
+        compose.runOnIdle { model.build(orders) }
+        await { !model.builder.loadingColumns }
+        compose.runOnIdle {
+            val builder = model.builder
+            builder.chosen.addAll(listOf("id", "status", "total"))
+            builder.filters.add(
+                BuilderFilter("status").apply {
+                    op = FilterOp.IN
+                    values[0] = "paid"
+                    values.add("shipped")
+                },
+            )
+            builder.filters.add(BuilderFilter("total").apply { op = FilterOp.GREATER_OR_EQUAL; value = "800" })
+            builder.groups.add(
+                androidx.compose.runtime.mutableStateListOf(
+                    BuilderFilter("total").apply {
+                        op = FilterOp.BETWEEN
+                        values[0] = "20"
+                        values[1] = "25"
+                    },
+                ),
+            )
+        }
+        shot("09-builder-or")
+
+        compose.runOnIdle { model.build(orders) }
+        await { !model.builder.loadingColumns }
+        compose.runOnIdle {
+            val builder = model.builder
+            builder.count = true
+            builder.groupBy.add("status")
+            builder.orderBy = BuilderState.COUNT
+            builder.descending = true
+        }
+        shot("10-builder-count")
+        compose.runOnIdle { check(model.openBuilt(run = true) == null) }
+        await { model.tab?.result != null || model.tab?.error != null }
+        check(model.tab?.error == null) { "the grouped query failed: ${model.tab?.error}" }
+        shot("11-count-results")
     }
 
     /**
