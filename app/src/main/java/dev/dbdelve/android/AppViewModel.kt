@@ -31,12 +31,18 @@ import kotlinx.coroutines.withContext
 import uniffi.dbdelve_core.Account
 import uniffi.dbdelve_core.Binding
 import uniffi.dbdelve_core.CatalogEntry
+import uniffi.dbdelve_core.CellEdit
 import uniffi.dbdelve_core.CoreException
 import uniffi.dbdelve_core.Destructive
 import uniffi.dbdelve_core.DbUser
+import uniffi.dbdelve_core.EditTarget
+import uniffi.dbdelve_core.KeyValue
 import uniffi.dbdelve_core.Mode
+import uniffi.dbdelve_core.NewValue
+import uniffi.dbdelve_core.ObjectKind
 import uniffi.dbdelve_core.Prepared
 import uniffi.dbdelve_core.ResultSet
+import uniffi.dbdelve_core.RowEdit
 import uniffi.dbdelve_core.RunOutcome
 import uniffi.dbdelve_core.Session
 import uniffi.dbdelve_core.Stop
@@ -48,6 +54,14 @@ import uniffi.dbdelve_core.openConnections
 import uniffi.dbdelve_core.sealConnections
 import uniffi.dbdelve_core.statementAt
 
+/**
+ * Where a tab's rows can be written back to: a table the app queried itself
+ * (the builder's query, a table's preview), with the exact statement it
+ * wrote. Rows from that statement can be edited once the table's primary key
+ * is known and every key column is in them.
+ */
+data class EditSource(val schema: String, val table: String, val statement: String)
+
 class QueryTab(val id: Long, title: String, text: String) {
     var title by mutableStateOf(title)
     var text by mutableStateOf(TextFieldValue(text, TextRange(text.length)))
@@ -55,7 +69,18 @@ class QueryTab(val id: Long, title: String, text: String) {
     var error by mutableStateOf<String?>(null)
     /** What was sent, exactly, so the results say what produced them. */
     var ran by mutableStateOf<String?>(null)
+
+    var source: EditSource? = null
+    /** Set once [result] is known to come, whole-keyed, from [source]'s table. */
+    var editTarget by mutableStateOf<EditTarget?>(null)
+    /** Why [result] cannot be edited, when it came from a table that could be. */
+    var notEditable by mutableStateOf<String?>(null)
+    /** Changed values by row of [result], then column name. */
+    val edits = mutableStateMapOf<Int, Map<String, NewValue>>()
 }
+
+/** Edits built and checked, waiting for the user to read them. */
+class EditReview(val tab: QueryTab, val target: EditTarget, val prepared: List<Prepared>, val rows: Int)
 
 /**
  * A statement the gate stopped, held while the user answers. Nothing was
@@ -321,6 +346,9 @@ class AppViewModel(
         profile = null
         catalog = emptyList()
         columnCache.clear()
+        keys.clear()
+        editReview = null
+        editMessage = null
         history = emptyList()
         gate = null
         users = emptyList()
@@ -440,6 +468,129 @@ class AppViewModel(
         return null
     }
 
+    /** Primary keys by schema and table, read once per connection. */
+    private val keys = mutableMapOf<Pair<String, String>, List<String>>()
+
+    /**
+     * Whether [result] can be edited: it came from the statement the app
+     * wrote for [QueryTab.source], the table has a primary key, and every
+     * key column is in the rows exactly once.
+     */
+    private fun resolveEditTarget(tab: QueryTab, statement: String, result: ResultSet) {
+        tab.editTarget = null
+        tab.notEditable = null
+        val source = tab.source ?: return
+        if (source.statement != statement) return
+        val session = session ?: return
+        scope.launch {
+            val table = source.schema to source.table
+            val key = keys[table] ?: withContext(Dispatchers.IO) {
+                runCatching { session.primaryKey(source.schema, source.table) }.getOrNull()
+            }?.also { keys[table] = it }
+            if (tab.result !== result) return@launch
+            val names = result.columns.map { it.name }
+            tab.notEditable = when {
+                key == null -> "Couldn't read ${source.table}'s primary key."
+                key.isEmpty() -> "${source.table} has no primary key, so a row can't be named for sure."
+                key.any { k -> names.count { it == k } != 1 } -> "Include ${key.joinToString(", ")} (the primary key) in the columns to edit rows."
+                else -> null
+            }
+            if (tab.notEditable == null && key != null) tab.editTarget = EditTarget(source.schema, source.table, key)
+        }
+    }
+
+    /** Changes a value of a row, or takes the change back when it is the value as read. */
+    fun stageEdit(tab: QueryTab, row: Int, column: String, value: NewValue) {
+        val result = tab.result ?: return
+        val at = result.columns.indexOfFirst { it.name == column }
+        val original = result.rows.getOrNull(row)?.getOrNull(at)
+        val unchanged = when (value) {
+            is NewValue.Null -> original == null
+            is NewValue.Text -> original == value.value
+            is NewValue.Json -> original == value.value
+        }
+        val changes = tab.edits[row].orEmpty().toMutableMap()
+        if (unchanged) changes.remove(column) else changes[column] = value
+        if (changes.isEmpty()) tab.edits.remove(row) else tab.edits[row] = changes
+    }
+
+    var editReview by mutableStateOf<EditReview?>(null)
+        private set
+    var editMessage by mutableStateOf<String?>(null)
+
+    /** Builds the statements for the tab's edits and holds them for review. Returns why not, or null. */
+    fun reviewEdits(tab: QueryTab): String? {
+        val session = session ?: return "Not connected."
+        val target = tab.editTarget ?: return tab.notEditable ?: "These rows can't be edited."
+        val result = tab.result ?: return "No rows."
+        val rows = tab.edits.toSortedMap().map { (row, changes) ->
+            val cells = result.rows[row]
+            RowEdit(
+                key = target.key.map { k ->
+                    val at = result.columns.indexOfFirst { it.name == k }
+                    val value = cells[at] ?: return "Row ${row + 1} has no ${k}: a NULL key names no row."
+                    KeyValue(k, value, result.columns[at].typeTag)
+                },
+                changes = changes.map { (column, value) -> CellEdit(column, value) },
+            )
+        }
+        val prepared = runCatching { session.prepareEdits(target, rows) }.getOrElse { return it.reason() }
+        editReview = EditReview(tab, target, prepared, rows.size)
+        return null
+    }
+
+    fun dismissEditReview() {
+        editReview?.prepared?.forEach { it.close() }
+        editReview = null
+    }
+
+    /**
+     * Runs the reviewed statements in order, each through the gate (which
+     * asks for Read-write), then reads the rows again. A failure stops there
+     * and says which; the edits are kept to try again.
+     */
+    fun applyEdits() {
+        val review = editReview ?: return
+        editReview = null
+        applyEdit(review, 0, null)
+    }
+
+    private fun applyEdit(review: EditReview, at: Int, onceIn: Mode?) {
+        val tab = review.tab
+        if (at == review.prepared.size) {
+            editMessage = "Saved ${review.rows} row${if (review.rows == 1) "" else "s"} of ${review.target.table}."
+            tab.edits.clear()
+            review.prepared.forEach { it.close() }
+            // Read the rows again, by the same statement: what is on screen
+            // is then what the server holds.
+            tab.source?.let { execute(tab, it.statement, emptyList(), runOnce = false, onceIn = null) }
+            return
+        }
+        val prepared = review.prepared[at]
+        val sent = System.currentTimeMillis()
+        send(
+            shown = prepared.shown(),
+            confirmed = emptyList(),
+            onceIn = onceIn,
+            // The user read every statement in the review: an answer to the
+            // gate holds for the rest of them.
+            retry = { _, _, mode -> applyEdit(review, at, mode) },
+            call = { it.runPrepared(prepared, emptyList(), onceIn) },
+            done = { result ->
+                record(prepared.shown(), sent, result, null)
+                applyEdit(review, at + 1, onceIn)
+            },
+            failed = { reason ->
+                record(prepared.shown(), sent, null, reason)
+                editMessage = if (review.prepared.size > 1) {
+                    "Edit ${at + 1} of ${review.prepared.size} failed, and the rest were not sent: $reason"
+                } else {
+                    "The edit failed: $reason"
+                }
+            },
+        )
+    }
+
     /** Runs the statement under the cursor, as typed. */
     fun runAtCursor() {
         val tab = tab ?: return
@@ -469,10 +620,14 @@ class AppViewModel(
                 tab.result = result
                 tab.error = null
                 tab.ran = statement
+                tab.edits.clear()
+                resolveEditTarget(tab, statement, result)
                 pane = Pane.RESULTS
             },
             failed = { reason ->
                 record(statement, sent, null, reason)
+                tab.edits.clear()
+                tab.editTarget = null
                 tab.error = reason
                 tab.ran = statement
                 pane = Pane.RESULTS
@@ -745,6 +900,8 @@ class AppViewModel(
         val filled = runCatching { fillParameters(session.engine(), built.text, builder.bindings(built)) }
             .getOrElse { return it.reason() }
         val tab = newTab(entry.name, filled)
+        // A count or a grouping names no row: only plain reads are editable.
+        if (!builder.aggregates) tab.source = EditSource(entry.schema, entry.name, filled)
         input = QueryInput.TEXT
         if (run) execute(tab, filled, emptyList(), runOnce = false, onceIn = null) else pane = Pane.QUERY
         return null
@@ -762,6 +919,7 @@ class AppViewModel(
         val session = session ?: return
         val text = session.preview(entry.schema, entry.name, rowLimit.toUInt())
         val tab = newTab(entry.name, text)
+        if (entry.kind != ObjectKind.VIEW) tab.source = EditSource(entry.schema, entry.name, text)
         execute(tab, text, emptyList(), runOnce = false, onceIn = null)
     }
 

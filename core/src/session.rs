@@ -612,6 +612,71 @@ impl Session {
         }
     }
 
+    /// The primary key's columns, in key order; none for a table without one,
+    /// a view, or a MongoDB view or system collection, which are not edited.
+    pub fn primary_key(&self, schema: String, name: String) -> Result<Vec<String>, CoreError> {
+        let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *driver {
+            Driver::Postgres { runtime, client } => {
+                let rows = runtime
+                    .block_on(client.query(
+                        "SELECT a.attname::text FROM pg_index i \
+                         JOIN pg_class c ON c.oid = i.indrelid \
+                         JOIN pg_namespace n ON n.oid = c.relnamespace \
+                         JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY (i.indkey) \
+                         WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary \
+                         ORDER BY array_position(i.indkey::int2[], a.attnum)",
+                        &[&schema, &name],
+                    ))
+                    .map_err(|error| query_error(postgres_error(error)))?;
+                Ok(rows.iter().map(|row| row.get(0)).collect())
+            }
+            Driver::MySql(conn) => conn
+                .exec(
+                    "SELECT COLUMN_NAME FROM information_schema.STATISTICS \
+                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' \
+                     ORDER BY SEQ_IN_INDEX",
+                    (schema, name),
+                )
+                .map_err(query_error),
+            Driver::Mongo { runtime, database } => {
+                if name.starts_with("system.") {
+                    return Ok(Vec::new());
+                }
+                let kinds = runtime
+                    .block_on(async {
+                        let cursor = database
+                            .list_collections()
+                            .filter(bson::doc! { "name": &name })
+                            .await?;
+                        cursor.try_collect::<Vec<_>>().await
+                    })
+                    .map_err(query_error)?;
+                let plain = kinds.iter().any(|spec| {
+                    spec.collection_type == mongodb::results::CollectionType::Collection
+                });
+                Ok(if plain {
+                    vec!["_id".to_owned()]
+                } else {
+                    Vec::new()
+                })
+            }
+        }
+    }
+
+    /// The statements that write edited rows back, checked by the write gate
+    /// in [`crate::edits`], each for [`Session::run_prepared`].
+    pub fn prepare_edits(
+        &self,
+        target: crate::EditTarget,
+        rows: Vec<crate::RowEdit>,
+    ) -> Result<Vec<Arc<Prepared>>, CoreError> {
+        Ok(crate::edits::prepare(self.engine, &target, &rows)?
+            .into_iter()
+            .map(Arc::new)
+            .collect())
+    }
+
     /// DBDelve's own preview of an object: the one place it writes a `LIMIT`,
     /// returned as text so the UI shows what it runs.
     pub fn preview(&self, schema: String, name: String, limit: u32) -> String {

@@ -9,6 +9,7 @@ uniffi::setup_scaffolding!();
 
 pub mod builder;
 pub mod bundle;
+pub mod edits;
 pub mod gate;
 pub mod mongo_cmd;
 pub mod params;
@@ -18,6 +19,7 @@ mod tls;
 pub mod users;
 
 pub use builder::{BuiltQuery, Filter, FilterOp, QuerySpec};
+pub use edits::{CellEdit, EditTarget, KeyValue, NewValue, RowEdit};
 pub use gate::{Destructive, Mode, Stop, Verdict};
 pub use params::{Binding, ParamValue};
 pub use session::{CatalogEntry, Column, ObjectKind, ResultSet, RunOutcome, Session};

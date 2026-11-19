@@ -196,12 +196,23 @@ pub fn abilities(engine: Engine) -> UserAbilities {
     }
 }
 
-/// A statement built for an action, held where the UI cannot change it.
+/// A statement built for an action (a user change, a row edit), held where
+/// the UI cannot change it.
 #[derive(uniffi::Object)]
 pub struct Prepared {
     pub(crate) text: String,
     shown: String,
     pub(crate) verdict: Verdict,
+}
+
+impl Prepared {
+    pub(crate) fn new(text: String, shown: String, verdict: Verdict) -> Self {
+        Self {
+            text,
+            shown,
+            verdict,
+        }
+    }
 }
 
 #[uniffi::export]

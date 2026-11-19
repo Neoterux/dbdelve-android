@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -64,6 +65,7 @@ import dev.dbdelve.android.data.HistoryEntry
 import dev.dbdelve.android.data.Updates
 import dev.dbdelve.android.data.SavedQuery
 import uniffi.dbdelve_core.Binding
+import uniffi.dbdelve_core.NewValue
 import uniffi.dbdelve_core.ParamValue
 import uniffi.dbdelve_core.ResultSet
 import uniffi.dbdelve_core.parameters
@@ -275,17 +277,39 @@ fun SaveQueryDialog(initial: String, onDismiss: () -> Unit, save: (String) -> Un
     )
 }
 
-/** Every field of one row, each copyable: tapping a cell or record opens it. */
+/**
+ * What the row sheet may change: [key] once the table's primary key is
+ * known (its columns are not edited), or why these rows cannot be.
+ */
+class RowEditing(
+    val key: List<String>?,
+    val notEditable: String?,
+    val staged: Map<String, NewValue>,
+    val onEdit: (column: Int) -> Unit,
+)
+
+/**
+ * Every field of one row, each copyable: tapping a cell or record opens it.
+ * Where the rows can be written back, each field but the key's has a pencil.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RowSheet(result: ResultSet, index: Int, copy: (String) -> Unit, onDismiss: () -> Unit) {
+fun RowSheet(result: ResultSet, index: Int, copy: (String) -> Unit, editing: RowEditing? = null, onDismiss: () -> Unit) {
     val row = result.rows.getOrNull(index) ?: return
     val palette = LocalPalette.current
     ModalBottomSheet(onDismissRequest = onDismiss) {
         SheetTitle("Row ${index + 1} of ${result.rows.size}")
         LazyColumn(Modifier.heightIn(max = 560.dp).navigationBarsPadding()) {
             items(result.columns.size) { at ->
-                val value = row.getOrNull(at)
+                val name = result.columns[at].name
+                val change = editing?.staged?.get(name)
+                val value = when (change) {
+                    null -> row.getOrNull(at)
+                    is NewValue.Text -> change.value
+                    is NewValue.Json -> change.value
+                    is NewValue.Null -> null
+                }
+                val canEdit = editing?.key != null && name !in editing.key
                 Column(
                     Modifier
                         .fillMaxWidth()
@@ -293,21 +317,39 @@ fun RowSheet(result: ResultSet, index: Int, copy: (String) -> Unit, onDismiss: (
                         .padding(horizontal = 24.dp, vertical = 10.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(result.columns[at].name, fontFamily = Mono, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                        Text(name, fontFamily = Mono, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                        if (editing?.key?.contains(name) == true) {
+                            Icon(Icons.Default.Key, contentDescription = "Primary key", tint = palette.faint, modifier = Modifier.size(14.dp).padding(end = 4.dp))
+                        }
                         Text(result.columns[at].typeTag, fontFamily = Mono, fontSize = 10.sp, color = palette.faint)
                     }
-                    Text(
-                        value ?: "NULL",
-                        fontFamily = Mono,
-                        fontSize = 14.sp,
-                        fontStyle = if (value == null) FontStyle.Italic else FontStyle.Normal,
-                        color = if (value == null) palette.faint else MaterialTheme.colorScheme.onSurface,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            value ?: "NULL",
+                            fontFamily = Mono,
+                            fontSize = 14.sp,
+                            fontStyle = if (value == null) FontStyle.Italic else FontStyle.Normal,
+                            color = when {
+                                change != null -> palette.orange
+                                value == null -> palette.faint
+                                else -> MaterialTheme.colorScheme.onSurface
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (canEdit) {
+                            IconButton(onClick = { editing!!.onEdit(at) }) {
+                                Icon(Icons.Default.Edit, contentDescription = "Change $name", tint = if (change != null) palette.orange else MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
                 }
             }
             item {
+                editing?.notEditable?.let {
+                    Text(it, fontSize = 12.sp, color = palette.yellow, modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 16.dp))
+                }
                 Text(
-                    "Tap a value to copy it.",
+                    if (editing?.key != null) "Tap a value to copy it, or the pencil to change it. Changes are written only after you review them." else "Tap a value to copy it.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(24.dp),

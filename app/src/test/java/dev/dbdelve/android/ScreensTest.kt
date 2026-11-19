@@ -10,6 +10,8 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.click
 import dev.dbdelve.android.data.HistoryStore
 import dev.dbdelve.android.data.Profile
 import dev.dbdelve.android.data.ProfileStore
@@ -210,6 +212,52 @@ class ScreensTest {
             "completion offered ${model.completions(model.tab!!.text.text, model.tab!!.text.text.length)}"
         }
         shot("17-completion")
+
+        // Row editing, end to end: a built query on a table with a primary key.
+        val customers = model.catalog.first { it.name == "customers" }
+        compose.runOnIdle { model.build(customers) }
+        await { !model.builder.loadingColumns }
+        compose.runOnIdle {
+            model.builder.chosen.addAll(listOf("id", "name", "email", "country"))
+            model.builder.orderBy = "id"
+            check(model.openBuilt(run = true) == null)
+        }
+        await { model.tab?.editTarget != null || model.tab?.notEditable != null || model.tab?.error != null }
+        val edited = model.tab!!
+        check(edited.editTarget?.key == listOf("id")) { "not editable: ${edited.notEditable} ${edited.error}" }
+        val before = edited.result!!.rows.take(2).map { it.toList() }
+        compose.runOnIdle {
+            model.stageEdit(edited, 0, "email", uniffi.dbdelve_core.NewValue.Text("ana@shop.ec"))
+            model.stageEdit(edited, 1, "country", uniffi.dbdelve_core.NewValue.Null)
+        }
+        shot("19-edits")
+        compose.onNodeWithText("ana@shop.ec").performClick()
+        compose.onNodeWithContentDescription("Primary key").assertExists()
+        shot("18-row-edit")
+        // A tap on the scrim above the sheet closes it.
+        compose.onAllNodes(androidx.compose.ui.test.isRoot())[1].performTouchInput { click(androidx.compose.ui.geometry.Offset(centerX, 60f)) }
+        compose.waitForIdle()
+        compose.runOnIdle { check(model.reviewEdits(edited) == null) }
+        shot("20-edit-review")
+        compose.runOnIdle { model.applyEdits() }
+        await { model.gate != null }
+        shot("21-edit-gate")
+        compose.runOnIdle { model.runOnceIn(Mode.READ_WRITE) }
+        await { model.editMessage != null && !model.running && edited.edits.isEmpty() && edited.result?.rows?.get(0)?.get(2) == "ana@shop.ec" }
+        check(model.editMessage!!.startsWith("Saved 2 rows")) { model.editMessage!! }
+        check(edited.result!!.rows[1][3] == null) { "country was not set to NULL" }
+        check(model.mode == Mode.READ_ONLY) { "run once changed the mode" }
+        // Put them back, by the same road.
+        compose.runOnIdle {
+            model.stageEdit(edited, 0, "email", uniffi.dbdelve_core.NewValue.Text(before[0][2]!!))
+            model.stageEdit(edited, 1, "country", uniffi.dbdelve_core.NewValue.Text(before[1][3]!!))
+            check(model.reviewEdits(edited) == null)
+            model.applyEdits()
+        }
+        await { model.gate != null }
+        compose.runOnIdle { model.runOnceIn(Mode.READ_WRITE) }
+        await { !model.running && edited.edits.isEmpty() && edited.result?.rows?.get(0)?.get(2) == before[0][2] }
+        check(edited.result!!.rows.take(2) == before) { "not restored: ${edited.result!!.rows.take(2)}" }
     }
 
     /** The notice of a newer release, with its notes from GitHub. Needs no database. */

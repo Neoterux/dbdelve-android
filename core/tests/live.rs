@@ -1082,3 +1082,239 @@ fn live_explain_mongo() {
     );
     setup(&session, "db.android_explain.drop()");
 }
+
+/// A row edit: the key read from the server, the statement refused in
+/// Read-only, run once in Read-write, and the values it wrote read back.
+fn edits_rows(
+    session: &Session,
+    schema: &str,
+    table: &str,
+    rows: Vec<dbdelve_core::RowEdit>,
+    check: &str,
+    expected: &[&[Option<&str>]],
+) {
+    use dbdelve_core::EditTarget;
+    let key = session.primary_key(schema.into(), table.into()).unwrap();
+    let target = EditTarget {
+        schema: schema.into(),
+        table: table.into(),
+        key,
+    };
+    let prepared = session.prepare_edits(target, rows).unwrap();
+    for statement in &prepared {
+        let stopped = session
+            .run_prepared(statement.clone(), Vec::new(), None)
+            .unwrap();
+        assert!(
+            matches!(
+                stopped,
+                RunOutcome::Stopped {
+                    stop: Stop::Upgrade {
+                        mode: Mode::ReadWrite
+                    },
+                    ..
+                }
+            ),
+            "Read-only must stop an edit: {stopped:?}"
+        );
+        let done = session
+            .run_prepared(statement.clone(), Vec::new(), Some(Mode::ReadWrite))
+            .unwrap();
+        assert!(matches!(done, RunOutcome::Done { .. }), "{done:?}");
+    }
+    assert_eq!(session.mode(), Mode::ReadOnly, "run once leaves the mode");
+    let result = done(
+        session
+            .run(check.into(), 100, Vec::new(), false, None)
+            .unwrap(),
+    );
+    let got: Vec<Vec<Option<&str>>> = result
+        .rows
+        .iter()
+        .map(|row| row.iter().map(|cell| cell.as_deref()).collect())
+        .collect();
+    assert_eq!(got, expected);
+}
+
+fn edit(key: &[(&str, &str, &str)], changes: &[(&str, Option<&str>)]) -> dbdelve_core::RowEdit {
+    use dbdelve_core::{CellEdit, KeyValue, NewValue, RowEdit};
+    RowEdit {
+        key: key
+            .iter()
+            .map(|(column, value, type_tag)| KeyValue {
+                column: (*column).into(),
+                value: (*value).into(),
+                type_tag: (*type_tag).into(),
+            })
+            .collect(),
+        changes: changes
+            .iter()
+            .map(|(column, value)| CellEdit {
+                column: (*column).into(),
+                value: match value {
+                    Some(value) => NewValue::Text {
+                        value: (*value).into(),
+                    },
+                    None => NewValue::Null,
+                },
+            })
+            .collect(),
+    }
+}
+
+#[test]
+#[ignore]
+fn live_edit_postgres() {
+    let Some(config) = config(
+        Engine::Postgres,
+        "DBDELVE_ANDROID_POSTGRES",
+        SslMode::Disable,
+    ) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_edit");
+    setup(&session, "DROP VIEW IF EXISTS android_edit_view");
+    setup(
+        &session,
+        "CREATE TABLE android_edit (line int, id int, qty int, note text, PRIMARY KEY (id, line))",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_edit VALUES (1, 1, 5, 'a'), (2, 1, 6, 'b'), (1, 2, 7, 'c')",
+    );
+    setup(
+        &session,
+        "CREATE VIEW android_edit_view AS SELECT * FROM android_edit",
+    );
+    assert_eq!(
+        session
+            .primary_key("public".into(), "android_edit".into())
+            .unwrap(),
+        ["id", "line"],
+        "key order, not column order"
+    );
+    assert!(
+        session
+            .primary_key("public".into(), "android_edit_view".into())
+            .unwrap()
+            .is_empty()
+    );
+    edits_rows(
+        &session,
+        "public",
+        "android_edit",
+        vec![
+            edit(
+                &[("id", "1", ""), ("line", "2", "")],
+                &[("qty", Some("60")), ("note", Some("it's"))],
+            ),
+            edit(&[("id", "2", ""), ("line", "1", "")], &[("note", None)]),
+        ],
+        "SELECT qty::text, note FROM android_edit ORDER BY id, line",
+        &[
+            &[Some("5"), Some("a")],
+            &[Some("60"), Some("it's")],
+            &[Some("7"), None],
+        ],
+    );
+    setup(&session, "DROP VIEW android_edit_view");
+    setup(&session, "DROP TABLE android_edit");
+}
+
+#[test]
+#[ignore]
+fn live_edit_mysql() {
+    let Some(config) = config(Engine::MySql, "DBDELVE_ANDROID_MYSQL", SslMode::Disable) else {
+        return;
+    };
+    let database = config.database.clone();
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_edit");
+    setup(
+        &session,
+        "CREATE TABLE android_edit (line int, id int, qty int, note text, PRIMARY KEY (id, line)) ENGINE=InnoDB",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_edit VALUES (1, 1, 5, 'a'), (2, 1, 6, 'b'), (1, 2, 7, 'c')",
+    );
+    assert_eq!(
+        session
+            .primary_key(database.clone(), "android_edit".into())
+            .unwrap(),
+        ["id", "line"]
+    );
+    edits_rows(
+        &session,
+        &database,
+        "android_edit",
+        vec![
+            edit(
+                &[("id", "1", ""), ("line", "2", "")],
+                &[("qty", Some("60")), ("note", Some("it's"))],
+            ),
+            edit(&[("id", "2", ""), ("line", "1", "")], &[("note", None)]),
+        ],
+        "SELECT qty, note FROM android_edit ORDER BY id, line",
+        &[
+            &[Some("5"), Some("a")],
+            &[Some("60"), Some("it's")],
+            &[Some("7"), None],
+        ],
+    );
+    setup(&session, "DROP TABLE android_edit");
+}
+
+#[test]
+#[ignore]
+fn live_edit_mongo() {
+    use dbdelve_core::{CellEdit, NewValue};
+    let Some(config) = config(Engine::Mongo, "DBDELVE_ANDROID_MONGO", SslMode::Disable) else {
+        return;
+    };
+    let database = config.database.clone();
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "db.android_edit.drop()");
+    setup(
+        &session,
+        "db.android_edit.insertMany([{_id: {$oid: '65a1b2c3d4e5f60718293a4b'}, n: 1, s: 'a'}, {_id: 'k2', n: 2, s: 'b'}])",
+    );
+    assert_eq!(
+        session
+            .primary_key(database.clone(), "android_edit".into())
+            .unwrap(),
+        ["_id"]
+    );
+    // The `_id` cells as the result grid holds them.
+    let read = done(
+        session
+            .run(
+                "db.android_edit.find({})".into(),
+                10,
+                Vec::new(),
+                false,
+                None,
+            )
+            .unwrap(),
+    );
+    let ids: Vec<String> = read
+        .rows
+        .iter()
+        .map(|row| row[0].clone().unwrap())
+        .collect();
+    let mut by_oid = edit(&[("_id", &ids[0], "objectid")], &[("s", Some("A"))]);
+    by_oid.changes.push(CellEdit {
+        column: "n".into(),
+        value: NewValue::Json { value: "10".into() },
+    });
+    edits_rows(
+        &session,
+        &database,
+        "android_edit",
+        vec![by_oid, edit(&[("_id", &ids[1], "string")], &[("s", None)])],
+        "db.android_edit.aggregate([{$project: {_id: 0, n: 1, s: 1}}])",
+        &[&[Some("10"), Some("A")], &[Some("2"), None]],
+    );
+    setup(&session, "db.android_edit.drop()");
+}

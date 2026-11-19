@@ -46,6 +46,10 @@ Drawn by `ScreensTest` from the app's own screens, connected to a Postgres
 |---|---|---|
 | ![A Postgres plan with timings, as text](screenshots/explain.png) | ![A column of the table named, offered above the key row](screenshots/completion.png) | ![The update notice and the release's notes](screenshots/update-notes.png) |
 
+| Editing a row | Changed, not yet sent | Review | The gate |
+|---|---|---|---|
+| ![A row's fields, the key marked, a pencil beside each other field](screenshots/row-edit.png) | ![Changed cells in orange, and Review](screenshots/edits.png) | ![The exact UPDATE statements before they run](screenshots/edit-review.png) | ![Read-only stops them: run once in Read-write, or switch](screenshots/edit-gate.png) |
+
 ## Target
 
 64-bit ARM phones on Android 12 or later.
@@ -213,6 +217,9 @@ They prove, on each engine, that:
   and on Postgres and MySQL the server's own hold still refuses a write
   hidden in a function the gate reads as a plain `SELECT`.
 - Cancel stops a 30-second sleep.
+- A row edit reads the primary key (in key order, none for a view), is
+  stopped in Read-only, runs once in Read-write, and writes exactly the
+  values given, NULL included; on MongoDB, by an ObjectId or a string `_id`.
 - A private CA's certificate is refused on the public roots and accepted with
   that CA; a self-signed Postgres certificate is accepted as the CA; a user
   the server admits only by certificate is refused without one and admitted
@@ -379,6 +386,41 @@ into the statement, and the filled statement passes the same gate as anything
 typed. A `:name` inside a string, a comment or a Postgres `::cast` is not a
 parameter. On MongoDB, `db.orders.find({status: :status})` works the same way.
 
+## Editing rows
+
+Rows can be changed where the app knows which row each one is: the rows of a
+query the builder wrote on one table, or of a table's preview from Schema,
+when the table has a primary key and every key column is in the rows. (A
+count or a grouping names no row, and neither does a typed query: the app
+does not guess where its rows came from.) This is the desktop's primary-key
+`UPDATE`, review and write gate:
+
+- **Tap a row, then the pencil** beside a field to change it, or set it to
+  NULL. The primary key's own columns (marked with a key) are not editable:
+  they name the row. Changed cells show in orange until written or
+  discarded; nothing is sent yet.
+- **Review** shows the exact statements: one
+  `UPDATE … SET … WHERE <every key column> = …` per row, values as string
+  literals the server converts to the column's type. Postgres applies a
+  batch as one transaction; MySQL gets it inside `START TRANSACTION … COMMIT`.
+  On MongoDB each row is an `updateOne({_id: …}, {$set: …})` run in order,
+  where a value is a string unless marked as a JSON value (`12`, `true`,
+  `{"$date": …}`).
+- **The write gate.** Before the review shows them, the core parses its own
+  statements back and refuses anything but exactly that: an `UPDATE` of that
+  table, literal values, a `WHERE` naming the whole primary key and nothing
+  else, read by the gate as a plain write (on MongoDB, an `updateOne` of that
+  collection by `_id` with only `$set`). Then **Run** goes through the gate
+  like a typed `UPDATE`: it needs Read-write, run once or switched, with the
+  same biometric prompt.
+- After writing, the rows are read again by the same statement, so what is
+  on screen is what the server holds. A failure keeps the changes to try
+  again, and on MongoDB says which row failed and that the rest were not sent.
+- Not edited: a key column, a value with a backslash on SQL engines (see
+  [Connection modes](#connection-modes); write that `UPDATE` in the editor),
+  MongoDB fields named with a `.` or a leading `$`, views, and tables
+  without a primary key.
+
 ## Completion
 
 As you type, the names that complete the word at the cursor show above the
@@ -482,15 +524,13 @@ classified the same way.
 Deliberate cuts, not oversights; those with a ceiling in the code are marked
 `ponytail:` there.
 
-- **Row editing.** The grid is read-only. Desktop's generated `UPDATE` with its
-  write gate is the next step.
 - **Column types on Postgres.** The simple protocol sends every value as text
   and doesn't say its type.
 - **SSH tunnels.** Desktop shells out to the system `ssh`, which Android
   doesn't have.
 - **Results across restarts.** Query tabs and their text are kept per
   connection; results are not, and nothing runs again on its own.
-- **Command palette, and the tablet
+- **Command palette and the tablet
   layout from the mockup** ([docs/mockup.html](docs/mockup.html)).
 
 ## What has and hasn't been compiled

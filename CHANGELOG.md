@@ -14,6 +14,13 @@ to its version and date.
   no longer pushes you to TLS Off. On Postgres a self-signed server
   certificate works as its own CA. Errors now say why a certificate was
   refused and what to add.
+- Editing rows. In the rows of a query the builder wrote, or of a table's
+  preview, tap a row and the pencil beside a field to change it or set it
+  to NULL, then Review: the exact UPDATE statements, each naming its row by
+  the whole primary key, run only after you read them and only in
+  Read-write (run once or switched), like anything typed. The app checks
+  its own statements before showing them and refuses anything but that
+  UPDATE.
 - Completion in the editor: the columns of the tables you name, and table
   or collection names, above the key row as you type; after `alias.`, that
   table's columns. A tap puts the name in, quoted where it must be.
