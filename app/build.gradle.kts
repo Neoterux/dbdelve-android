@@ -104,6 +104,7 @@ val uniffiBindings by tasks.registering(Exec::class) {
         "--out-dir", bindingsDir.get().asFile.absolutePath,
     )
     inputs.dir(jniLibsDir)
+    inputs.file(coreDir.resolve("uniffi.toml"))
     outputs.dir(bindingsDir)
     // A stripped library makes bindgen write nothing and exit happily, and
     // the build then fails far away, on every type it names.
