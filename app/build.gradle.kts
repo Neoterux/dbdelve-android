@@ -39,6 +39,13 @@ android {
         }
     }
 
+    // CI sets DBDELVE_REQUIRE_SIGNING outside pull requests: a release
+    // build there must not quietly fall back to the debug key.
+    val requireSigning = System.getenv("DBDELVE_REQUIRE_SIGNING") == "true"
+    check(!requireSigning || signingConfigs.findByName("release") != null) {
+        "DBDELVE_REQUIRE_SIGNING is set but DBDELVE_SIGNING_STORE is not: no release key to sign with."
+    }
+
     buildTypes {
         release {
             // R8 shrinks, optimises and obfuscates; proguard-rules.pro keeps
@@ -147,7 +154,6 @@ dependencies {
     // The full icon set; R8 keeps only the icons the app draws.
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.fragment:fragment-ktx:1.8.5")
     implementation("net.java.dev.jna:jna:5.14.0@aar")

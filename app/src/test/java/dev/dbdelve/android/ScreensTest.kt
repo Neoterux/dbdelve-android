@@ -8,7 +8,11 @@ import android.view.WindowManager
 import androidx.compose.material3.Surface
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.click
+import dev.dbdelve.android.data.HistoryStore
 import dev.dbdelve.android.data.Profile
 import dev.dbdelve.android.data.ProfileStore
 import dev.dbdelve.android.data.SavedQueryStore
@@ -64,13 +68,15 @@ class ScreensTest {
             Secrets(app),
             TabStore(File(files, "tabs")),
             SavedQueryStore(files),
+            HistoryStore(File(files, "history")),
             updates,
             installedVersion = "0.0.0",
+            tlsDir = File(files, "tls"),
         ) {}
         val shop = Profile("shop", "Shop (local)", "Demo", Engine.POSTGRES, host, port.toInt(), user, database, SslMode.DISABLE, Mode.READ_ONLY)
-        model.saveProfile(shop, null)
-        model.saveProfile(shop.copy(id = "reports", name = "Reports replica", project = "Demo", mode = Mode.READ_WRITE), null)
-        model.saveProfile(shop.copy(id = "events", name = "Events", project = "Analytics", engine = Engine.MONGO, port = 27017), null)
+        model.saveProfile(shop, null, null)
+        model.saveProfile(shop.copy(id = "reports", name = "Reports replica", project = "Demo", mode = Mode.READ_WRITE), null, null)
+        model.saveProfile(shop.copy(id = "events", name = "Events", project = "Analytics", engine = Engine.MONGO, port = 27017), null, null)
 
         compose.setContent {
             DBDelveTheme {
@@ -129,6 +135,160 @@ class ScreensTest {
 
         compose.runOnIdle { model.pane = Pane.QUERY }
         shot("08-built-tab")
+
+        compose.runOnIdle { model.build(orders) }
+        await { !model.builder.loadingColumns }
+        compose.runOnIdle {
+            val builder = model.builder
+            builder.chosen.addAll(listOf("id", "status", "total"))
+            builder.filters.add(
+                BuilderFilter("status").apply {
+                    op = FilterOp.IN
+                    values[0] = "paid"
+                    values.add("shipped")
+                },
+            )
+            builder.filters.add(BuilderFilter("total").apply { op = FilterOp.GREATER_OR_EQUAL; value = "800" })
+            builder.groups.add(
+                androidx.compose.runtime.mutableStateListOf(
+                    BuilderFilter("total").apply {
+                        op = FilterOp.BETWEEN
+                        values[0] = "20"
+                        values[1] = "25"
+                    },
+                ),
+            )
+        }
+        shot("09-builder-or")
+
+        compose.runOnIdle { model.build(orders) }
+        await { !model.builder.loadingColumns }
+        compose.runOnIdle {
+            val builder = model.builder
+            builder.count = true
+            builder.groupBy.add("status")
+            builder.orderBy = BuilderState.COUNT
+            builder.descending = true
+        }
+        shot("10-builder-count")
+        compose.runOnIdle { check(model.openBuilt(run = true) == null) }
+        await { model.tab?.result != null || model.tab?.error != null }
+        check(model.tab?.error == null) { "the grouped query failed: ${model.tab?.error}" }
+        shot("11-count-results")
+
+        // A failure, so history shows both kinds.
+        compose.runOnIdle {
+            model.newTab("typo", "SELECT * FROM order_itmes;")
+            model.edit(model.tab!!, textAt(model.tab!!.text.text))
+            model.runAtCursor()
+        }
+        await { model.tab?.error != null }
+        check(model.history.size >= 4) { "history holds ${model.history.size}" }
+        check(model.history.first().error != null && model.history.first().text.trimEnd(';') == "SELECT * FROM order_itmes") { "history begins ${model.history.first()}" }
+        compose.runOnIdle { model.pane = Pane.QUERY }
+        compose.onNodeWithContentDescription("History").performClick()
+        shot("12-history")
+
+        compose.runOnIdle {
+            model.pane = Pane.QUERY
+            model.newTab("plan", "SELECT * FROM orders WHERE status = 'paid' ORDER BY total DESC;")
+            model.edit(model.tab!!, textAt(model.tab!!.text.text))
+            check(model.explain(analyze = true) == null)
+        }
+        await { model.tab?.result != null || model.tab?.error != null }
+        check(model.tab?.error == null) { "explain failed: ${model.tab?.error}" }
+        check(model.tab?.text?.text == "SELECT * FROM orders WHERE status = 'paid' ORDER BY total DESC;") { "explain touched the buffer" }
+        shot("13-explain")
+        compose.runOnIdle { model.pane = Pane.QUERY }
+        shot("14-editor-tools")
+
+        compose.runOnIdle {
+            val text = "SELECT id, total\nFROM orders\nWHERE st"
+            model.newTab("complete", text)
+            model.edit(model.tab!!, androidx.compose.ui.text.input.TextFieldValue(text, androidx.compose.ui.text.TextRange(text.length)))
+        }
+        await { "orders" in model.columnCache }
+        check(model.completions(model.tab!!.text.text, model.tab!!.text.text.length)?.second?.map { it.name } == listOf("status")) {
+            "completion offered ${model.completions(model.tab!!.text.text, model.tab!!.text.text.length)}"
+        }
+        shot("17-completion")
+
+        // Row editing, end to end: a built query on a table with a primary key.
+        val customers = model.catalog.first { it.name == "customers" }
+        compose.runOnIdle { model.build(customers) }
+        await { !model.builder.loadingColumns }
+        compose.runOnIdle {
+            model.builder.chosen.addAll(listOf("id", "name", "email", "country"))
+            model.builder.orderBy = "id"
+            check(model.openBuilt(run = true) == null)
+        }
+        await { model.tab?.editTarget != null || model.tab?.notEditable != null || model.tab?.error != null }
+        val edited = model.tab!!
+        check(edited.editTarget?.key == listOf("id")) { "not editable: ${edited.notEditable} ${edited.error}" }
+        val before = edited.result!!.rows.take(2).map { it.toList() }
+        compose.runOnIdle {
+            model.stageEdit(edited, 0, "email", uniffi.dbdelve_core.NewValue.Text("ana@shop.ec"))
+            model.stageEdit(edited, 1, "country", uniffi.dbdelve_core.NewValue.Null)
+        }
+        shot("19-edits")
+        compose.onNodeWithText("ana@shop.ec").performClick()
+        compose.onNodeWithContentDescription("Primary key").assertExists()
+        shot("18-row-edit")
+        // A tap on the scrim above the sheet closes it.
+        compose.onAllNodes(androidx.compose.ui.test.isRoot())[1].performTouchInput { click(androidx.compose.ui.geometry.Offset(centerX, 60f)) }
+        compose.waitForIdle()
+        compose.runOnIdle { check(model.reviewEdits(edited) == null) }
+        shot("20-edit-review")
+        compose.runOnIdle { model.applyEdits() }
+        await { model.gate != null }
+        shot("21-edit-gate")
+        compose.runOnIdle { model.runOnceIn(Mode.READ_WRITE) }
+        await { model.editMessage != null && !model.running && edited.edits.isEmpty() && edited.result?.rows?.get(0)?.get(2) == "ana@shop.ec" }
+        check(model.editMessage!!.startsWith("Saved 2 rows")) { model.editMessage!! }
+        check(edited.result!!.rows[1][3] == null) { "country was not set to NULL" }
+        check(model.mode == Mode.READ_ONLY) { "run once changed the mode" }
+        // Put them back, by the same road.
+        compose.runOnIdle {
+            model.stageEdit(edited, 0, "email", uniffi.dbdelve_core.NewValue.Text(before[0][2]!!))
+            model.stageEdit(edited, 1, "country", uniffi.dbdelve_core.NewValue.Text(before[1][3]!!))
+            check(model.reviewEdits(edited) == null)
+            model.applyEdits()
+        }
+        await { model.gate != null }
+        compose.runOnIdle { model.runOnceIn(Mode.READ_WRITE) }
+        await { !model.running && edited.edits.isEmpty() && edited.result?.rows?.get(0)?.get(2) == before[0][2] }
+        check(edited.result!!.rows.take(2) == before) { "not restored: ${edited.result!!.rows.take(2)}" }
+    }
+
+    /** The notice of a newer release, with its notes from GitHub. Needs no database. */
+    @Test
+    fun updateNotice() {
+        assumeTrue("DBDELVE_SCREENS_PG is not set", System.getenv("DBDELVE_SCREENS_PG") != null)
+        val app = RuntimeEnvironment.getApplication()
+        val files = File(app.filesDir, "notice-${System.nanoTime()}").apply { mkdirs() }
+        val updates = UpdateStore(app).apply {
+            automatic = false
+            found = dev.dbdelve.android.data.Updates.Release(
+                "0.4.0",
+                "https://github.com/Neoterux/dbdelve-android/releases/tag/v0.4.0",
+                null,
+                "### Added\n\n- Explain, under the editor: the plan of the statement under the cursor,\n  or the plan with timings.\n- History for each connection: every statement sent, exactly as sent.\n- TLS with your own CA, and client certificates.\n\n### Changed\n\n- A running statement keeps running when you leave the app.",
+            )
+        }
+        val model = AppViewModel(
+            ProfileStore(files),
+            Secrets(app),
+            TabStore(File(files, "tabs")),
+            SavedQueryStore(files),
+            HistoryStore(File(files, "history")),
+            updates,
+            installedVersion = "0.3.0",
+            tlsDir = File(files, "tls"),
+        ) {}
+        compose.setContent { DBDelveTheme { Surface { ConnectionsScreen(model) } } }
+        shot("15-update")
+        compose.onNodeWithText("What's new").performClick()
+        shot("16-update-notes")
     }
 
     /**

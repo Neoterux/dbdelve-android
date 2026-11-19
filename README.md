@@ -21,7 +21,8 @@ app under **What's new**.
 
 The app asks GitHub for the latest release (at most twice a day, nothing sent
 but the request itself) and shows a notice with a download link when a newer
-one is out; turn this off under **Check automatically** in the menu. An APK
+one is out, with the start of its notes; **What's new** opens the release's
+notes in the app (as text: no page loads, no link is followed); turn this off under **Check automatically** in the menu. An APK
 updates the installed app only when both are signed with the same key.
 
 ## Screenshots
@@ -36,6 +37,18 @@ Drawn by `ScreensTest` from the app's own screens, connected to a Postgres
 | Schema | Query builder | Built query's rows | Built query as SQL |
 |---|---|---|---|
 | ![Tables and views with their sizes](screenshots/schema.png) | ![The builder: columns, two filters, and the statement it writes pinned above Run](screenshots/builder.png) | ![The built query's rows](screenshots/builder-results.png) | ![The built statement in a tab of its own](screenshots/built-tab.png) |
+
+| IN and an OR group | Count per group | Counted rows | History |
+|---|---|---|---|
+| ![An IN filter with two values, and a second group joined by OR](screenshots/builder-or.png) | ![Count rows, grouped by status, sorted by the count](screenshots/builder-count.png) | ![One row per status with its count](screenshots/count-results.png) | ![Statements as sent, newest first, each with its outcome and when](screenshots/history.png) |
+
+| Explain | Completion | A newer release |
+|---|---|---|
+| ![A Postgres plan with timings, as text](screenshots/explain.png) | ![A column of the table named, offered above the key row](screenshots/completion.png) | ![The update notice and the release's notes](screenshots/update-notes.png) |
+
+| Editing a row | Changed, not yet sent | Review | The gate |
+|---|---|---|---|
+| ![A row's fields, the key marked, a pencil beside each other field](screenshots/row-edit.png) | ![Changed cells in orange, and Review](screenshots/edits.png) | ![The exact UPDATE statements before they run](screenshots/edit-review.png) | ![Read-only stops them: run once in Read-write, or switch](screenshots/edit-gate.png) |
 
 ## Target
 
@@ -55,10 +68,15 @@ Drawn by `ScreensTest` from the app's own screens, connected to a Postgres
 - **No CPU-specific tuning of the Rust core.** It waits on the network, not
   the CPU, and rustls's crypto already detects and uses the chip's AES and SHA
   instructions at runtime.
+- **The session belongs to the process, not the screen.** A back gesture,
+  swiping DBDelve from recents or Android destroying the activity leaves a
+  running statement running; reopening the app finds it, its tabs and its
+  results. Once the screen is gone for good, the session closes, at once or
+  when the statement running ends.
 - **A foreground service while a statement runs** (`QueryService`), because
-  some Android builds reclaim background apps within minutes. For long
-  statements, also allow DBDelve to run in the background in the phone's
-  battery settings.
+  some Android builds reclaim background apps within minutes, and that would
+  end the process and the session with it. For long statements, also allow
+  DBDelve to run in the background in the phone's battery settings.
 - **The mode prompt takes face unlock, fingerprint or PIN.** It accepts weak
   biometrics, and many phones' face unlock is not a strong biometric.
 
@@ -133,9 +151,13 @@ then open **Actions → build → Run workflow** and enter the version (e.g.
 publishes `dbdelve-android-0.2.0.apk` with that changelog section as its notes.
 Pushing a `v*` tag does the same.
 
-**Sign with your own key, once,** or each CI build is signed with a
-throwaway key, and Android refuses to install it over the previous one
-without uninstalling first, which deletes saved connections:
+**Sign with your own key, once.** Every build except a pull request's
+needs it: a push to `main`, a tag or a published release with no key fails
+instead of shipping an APK signed with a throwaway key, which Android refuses
+to install over the previous one without uninstalling first (and that deletes
+saved connections). After the build, CI checks the APK is not signed with a
+debug key. Pull requests still build with the runner's debug key, since a
+fork's pull request gets no secrets.
 
 ```sh
 keytool -genkeypair -v -keystore dbdelve-release.jks -alias dbdelve \
@@ -174,6 +196,14 @@ DBDELVE_ANDROID_MONGO=127.0.0.1:57007:::dev \
 cargo test -- --include-ignored
 ```
 
+TLS beyond the public roots has its own servers, skipped unless set:
+`DBDELVE_ANDROID_TLS_CERTS` names a directory holding `ca.pem`, `client.pem`
+and `client.key` (signed by that CA for the user `tlsuser`) and `self.pem`,
+and `DBDELVE_ANDROID_POSTGRES_TLS`, `DBDELVE_ANDROID_MYSQL_TLS`,
+`DBDELVE_ANDROID_MONGO_TLS` and `DBDELVE_ANDROID_POSTGRES_SELF_SIGNED` name
+servers presenting that CA's certificate (or, the last, `self.pem`). CI makes
+the certificates and servers in `.github/tls.sh`.
+
 They prove, on each engine, that:
 
 - A user created here with a password hashed on this side can log in, its
@@ -187,6 +217,13 @@ They prove, on each engine, that:
   and on Postgres and MySQL the server's own hold still refuses a write
   hidden in a function the gate reads as a plain `SELECT`.
 - Cancel stops a 30-second sleep.
+- A row edit reads the primary key (in key order, none for a view), is
+  stopped in Read-only, runs once in Read-write, and writes exactly the
+  values given, NULL included; on MongoDB, by an ObjectId or a string `_id`.
+- A private CA's certificate is refused on the public roots and accepted with
+  that CA; a self-signed Postgres certificate is accepted as the CA; a user
+  the server admits only by certificate is refused without one and admitted
+  with it; and no TLS file outlives its session.
 - A read past the row limit is stopped, not drained: a twenty-million-row
   Postgres read and a multi-million-row MySQL cross join both come back in
   seconds. Inside a Postgres transaction you opened, the read is drained
@@ -217,10 +254,40 @@ The user must log in with a blank password (`trust` authentication).
   against yaSSL offer only TLS 1.0 and 1.1, so "Verified" fails and names the
   cause. Either enable TLS 1.2 on the server, or choose TLS "Off" over a
   network you trust (VPN or SSH tunnel). It never falls back to plaintext
-  silently.
+  silently. A server with a certificate from your own CA needs that CA under
+  [TLS](#tls), not Off.
 - No statement timeout is set: `max_execution_time` arrived in 5.7. Cancel
   sends `KILL QUERY` on a side connection.
 - Auth is `mysql_native_password`, 5.6's default.
+
+## TLS
+
+**Verified** (the default) means TLS 1.2 or later, with the server's
+certificate checked against a root and the host name, and it never falls back
+to plaintext. Under it, a connection can also hold:
+
+- **A trusted CA**: your own or your company's CA certificate, trusted besides
+  the public roots, so an internal server needs no public certificate. On
+  Postgres, a server's own **self-signed** certificate works here too: it is
+  trusted only byte for byte. (OpenSSL marks a self-signed certificate as a
+  CA, which the TLS library here refuses as a server's own; MySQL's and
+  MongoDB's drivers check it that way and refuse it, so on those, issue the
+  server a certificate from a CA of your own.) On MongoDB a CA given here
+  replaces the public roots, as its driver does; elsewhere it adds to them.
+- **A client certificate** and its unencrypted private key, for servers that
+  ask the client to prove who it is (Postgres `cert`, MySQL `REQUIRE X509`,
+  MongoDB `x.509`). The key is sealed by the Keystore like a password.
+
+Files are chosen with Android's file picker, and each shows its SHA-256
+fingerprint to compare with the server's administrator. Nothing here relaxes
+a check: there is no "accept any certificate". MySQL's and MongoDB's drivers
+read TLS files only from disk, so while such a session is open its PEMs sit
+in the app's private no-backup directory, deleted when it closes. A shared
+connections file carries the CA always, and the client certificate and key
+only with passwords.
+
+The live tests cover this against a private CA, a self-signed Postgres, and
+client certificates (see [Checks](#checks)).
 
 ## Connection modes
 
@@ -268,8 +335,27 @@ thing that stops a write. Use a read-only role for anything that matters.
 
 **Builder**, beside **SQL** at the top of the Query screen, makes a query by
 tapping: choose a table (or **Build a query** on one in Schema), tap its
-columns, add filters (=, ≠, <, ≤, >, ≥, like, is null, not null), a sort and
-a limit. The statement it writes stays on screen above **Run** as it changes.
+columns, add filters (=, ≠, <, ≤, >, ≥, like, like ignoring case, in,
+between, is null, not null), a sort and a limit. The statement it writes stays
+on screen above **Run** as it changes.
+
+- **And, or.** Filters in one group must all hold; **Or…** starts another
+  group, and a row matches if any group does: `(a AND b) OR (c)`.
+- **Ignoring case** is `ILIKE` on Postgres, `LOWER(…) LIKE LOWER(…)` on
+  MySQL (whose collation may already ignore case, or may not), and a regular
+  expression with the `i` option on MongoDB.
+- **In** takes as many values as you list; **between** takes a from and a to,
+  both included.
+- **Count rows**, and **Group by** one or more columns, answer "how many":
+  one row per group with its `count`, sortable by either. On MongoDB this is
+  a `$group` pipeline; fields named with a `.` or a leading `$` read as paths
+  there, so they are not offered to group by.
+- **No joins.** They are where tapping gets worse than typing; write those in
+  the SQL editor.
+
+On MongoDB the columns to choose from are every field found in a random
+sample of 100 documents (`$sample`), so a field most documents lack still
+shows.
 
 The core writes the statement (`core/src/builder.rs`), quoting every name in
 the engine's own way, and every value typed into a filter becomes a `:name`
@@ -284,8 +370,9 @@ since this app's MongoDB commands take no cursor chains.
 
 ## Saved queries and parameters
 
-Save the tab you are writing (the bookmark with a plus, under the editor) and
-it is kept for that connection; the bookmarks beside it open the list. Write `:name` wherever a value
+Save the tab you are writing (the bookmarks under the editor, then **Save
+this query**) and it is kept for that connection; **Saved queries** in the
+same menu opens the list. Write `:name` wherever a value
 goes:
 
 ```sql
@@ -298,6 +385,84 @@ literal (a string quoted, a number checked to be one), never as text spliced
 into the statement, and the filled statement passes the same gate as anything
 typed. A `:name` inside a string, a comment or a Postgres `::cast` is not a
 parameter. On MongoDB, `db.orders.find({status: :status})` works the same way.
+
+## Editing rows
+
+Rows can be changed where the app knows which row each one is: the rows of a
+query the builder wrote on one table, or of a table's preview from Schema,
+when the table has a primary key and every key column is in the rows. (A
+count or a grouping names no row, and neither does a typed query: the app
+does not guess where its rows came from.) This is the desktop's primary-key
+`UPDATE`, review and write gate:
+
+- **Tap a row, then the pencil** beside a field to change it, or set it to
+  NULL. The primary key's own columns (marked with a key) are not editable:
+  they name the row. Changed cells show in orange until written or
+  discarded; nothing is sent yet.
+- **Review** shows the exact statements: one
+  `UPDATE … SET … WHERE <every key column> = …` per row, values as string
+  literals the server converts to the column's type. Postgres applies a
+  batch as one transaction; MySQL gets it inside `START TRANSACTION … COMMIT`.
+  On MongoDB each row is an `updateOne({_id: …}, {$set: …})` run in order,
+  where a value is a string unless marked as a JSON value (`12`, `true`,
+  `{"$date": …}`).
+- **The write gate.** Before the review shows them, the core parses its own
+  statements back and refuses anything but exactly that: an `UPDATE` of that
+  table, literal values, a `WHERE` naming the whole primary key and nothing
+  else, read by the gate as a plain write (on MongoDB, an `updateOne` of that
+  collection by `_id` with only `$set`). Then **Run** goes through the gate
+  like a typed `UPDATE`: it needs Read-write, run once or switched, with the
+  same biometric prompt.
+- After writing, the rows are read again by the same statement, so what is
+  on screen is what the server holds. A failure keeps the changes to try
+  again, and on MongoDB says which row failed and that the rest were not sent.
+- Not edited: a key column, a value with a backslash on SQL engines (see
+  [Connection modes](#connection-modes); write that `UPDATE` in the editor),
+  MongoDB fields named with a `.` or a leading `$`, views, and tables
+  without a primary key.
+
+## Completion
+
+As you type, the names that complete the word at the cursor show above the
+key row: the columns of the tables the text names, then tables (or, after
+`db.`, collections). After `alias.` it offers that table's columns, reading
+`FROM orders o` and `JOIN orders AS o`. A tap replaces the word, quoting a
+name the engine would otherwise read differently (`"Orders"` on Postgres,
+which folds unquoted names to lower case). Names come from the schema list
+and the server's own column list, read once per table per connection, and
+not while a statement runs. No keywords and no guesses: only names that
+exist.
+
+## Explain
+
+The plan icon under the editor explains the statement under the cursor:
+**Plan** shows how the server would run it and runs nothing; **Plan with
+timings** (`EXPLAIN ANALYZE`, or MongoDB's `executionStats`) runs it to
+measure. It is a copy: the editor's text is never changed, and the plan
+shows as the tab's result, a Postgres plan as text rather than cells.
+
+- With timings, the statement runs, so the gate treats it as the statement
+  itself: `EXPLAIN ANALYZE DELETE …` needs Full and asks first, as the
+  `DELETE` would. A plain plan of a write passes in Read-only on Postgres;
+  MySQL's own read-only hold refuses even to plan one there.
+- On MongoDB, a `find`, `aggregate` or `countDocuments` is sent with the
+  server's `explain` command, and its plan is shown as one row per stage:
+  the stage (`COLLSCAN`, `IXSCAN`…), its index, what it returned, the
+  documents and keys it examined, its time, and its filter or index bounds,
+  with the totals first. `db.c.find(…).explain()` and
+  `.explain('executionStats')` also work typed. Writes are not explained.
+- `EXPLAIN ANALYZE` on MySQL needs 8.0.18; on 5.6 the server's error says so.
+
+## History
+
+The clock beside the editor's bookmarks lists every statement this
+connection sent, newest first: the exact text (a saved query's or the
+builder's with its values filled in), when, and what came of it: rows and
+time, rows affected, or the error. Tap one to open it in a tab of its own;
+the copy button copies it. A statement sent again moves to the top. Only
+what the gate let through is here, since a stop sends nothing; nor are the
+user-management statements, which carry password hashes. The last 200 are
+kept per connection, on the phone only, and **Clear** forgets them.
 
 ## Sharing connections
 
@@ -359,18 +524,13 @@ classified the same way.
 Deliberate cuts, not oversights; those with a ceiling in the code are marked
 `ponytail:` there.
 
-- **Row editing.** The grid is read-only. Desktop's generated `UPDATE` with its
-  write gate is the next step.
 - **Column types on Postgres.** The simple protocol sends every value as text
   and doesn't say its type.
 - **SSH tunnels.** Desktop shells out to the system `ssh`, which Android
   doesn't have.
 - **Results across restarts.** Query tabs and their text are kept per
   connection; results are not, and nothing runs again on its own.
-- **A session that outlives its screen.** The foreground service keeps the
-  process alive, but the session belongs to the view model, so a statement
-  still ends if Android destroys the activity outright.
-- **Command palette, query history, completion, Explain, and the tablet
+- **Command palette and the tablet
   layout from the mockup** ([docs/mockup.html](docs/mockup.html)).
 
 ## What has and hasn't been compiled

@@ -3,6 +3,7 @@ package dev.dbdelve.android.ui
 import android.content.Context
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,9 +18,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircleOutline
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -44,7 +50,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -52,8 +61,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.dbdelve.android.AppViewModel
+import dev.dbdelve.android.data.HistoryEntry
+import dev.dbdelve.android.data.Updates
 import dev.dbdelve.android.data.SavedQuery
 import uniffi.dbdelve_core.Binding
+import uniffi.dbdelve_core.NewValue
 import uniffi.dbdelve_core.ParamValue
 import uniffi.dbdelve_core.ResultSet
 import uniffi.dbdelve_core.parameters
@@ -265,17 +277,39 @@ fun SaveQueryDialog(initial: String, onDismiss: () -> Unit, save: (String) -> Un
     )
 }
 
-/** Every field of one row, each copyable: tapping a cell or record opens it. */
+/**
+ * What the row sheet may change: [key] once the table's primary key is
+ * known (its columns are not edited), or why these rows cannot be.
+ */
+class RowEditing(
+    val key: List<String>?,
+    val notEditable: String?,
+    val staged: Map<String, NewValue>,
+    val onEdit: (column: Int) -> Unit,
+)
+
+/**
+ * Every field of one row, each copyable: tapping a cell or record opens it.
+ * Where the rows can be written back, each field but the key's has a pencil.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RowSheet(result: ResultSet, index: Int, copy: (String) -> Unit, onDismiss: () -> Unit) {
+fun RowSheet(result: ResultSet, index: Int, copy: (String) -> Unit, editing: RowEditing? = null, onDismiss: () -> Unit) {
     val row = result.rows.getOrNull(index) ?: return
     val palette = LocalPalette.current
     ModalBottomSheet(onDismissRequest = onDismiss) {
         SheetTitle("Row ${index + 1} of ${result.rows.size}")
         LazyColumn(Modifier.heightIn(max = 560.dp).navigationBarsPadding()) {
             items(result.columns.size) { at ->
-                val value = row.getOrNull(at)
+                val name = result.columns[at].name
+                val change = editing?.staged?.get(name)
+                val value = when (change) {
+                    null -> row.getOrNull(at)
+                    is NewValue.Text -> change.value
+                    is NewValue.Json -> change.value
+                    is NewValue.Null -> null
+                }
+                val canEdit = editing?.key != null && name !in editing.key
                 Column(
                     Modifier
                         .fillMaxWidth()
@@ -283,21 +317,39 @@ fun RowSheet(result: ResultSet, index: Int, copy: (String) -> Unit, onDismiss: (
                         .padding(horizontal = 24.dp, vertical = 10.dp),
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(result.columns[at].name, fontFamily = Mono, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                        Text(name, fontFamily = Mono, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                        if (editing?.key?.contains(name) == true) {
+                            Icon(Icons.Default.Key, contentDescription = "Primary key", tint = palette.faint, modifier = Modifier.size(14.dp).padding(end = 4.dp))
+                        }
                         Text(result.columns[at].typeTag, fontFamily = Mono, fontSize = 10.sp, color = palette.faint)
                     }
-                    Text(
-                        value ?: "NULL",
-                        fontFamily = Mono,
-                        fontSize = 14.sp,
-                        fontStyle = if (value == null) FontStyle.Italic else FontStyle.Normal,
-                        color = if (value == null) palette.faint else MaterialTheme.colorScheme.onSurface,
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            value ?: "NULL",
+                            fontFamily = Mono,
+                            fontSize = 14.sp,
+                            fontStyle = if (value == null) FontStyle.Italic else FontStyle.Normal,
+                            color = when {
+                                change != null -> palette.orange
+                                value == null -> palette.faint
+                                else -> MaterialTheme.colorScheme.onSurface
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (canEdit) {
+                            IconButton(onClick = { editing!!.onEdit(at) }) {
+                                Icon(Icons.Default.Edit, contentDescription = "Change $name", tint = if (change != null) palette.orange else MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
                 }
             }
             item {
+                editing?.notEditable?.let {
+                    Text(it, fontSize = 12.sp, color = palette.yellow, modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 16.dp))
+                }
                 Text(
-                    "Tap a value to copy it.",
+                    if (editing?.key != null) "Tap a value to copy it, or the pencil to change it. Changes are written only after you review them." else "Tap a value to copy it.",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(24.dp),
@@ -312,22 +364,55 @@ fun RowSheet(result: ResultSet, index: Int, copy: (String) -> Unit, onDismiss: (
 @Composable
 fun ChangelogSheet(onDismiss: () -> Unit) {
     val context = LocalContext.current
-    val lines = remember {
-        runCatching { context.assets.open("CHANGELOG.md").bufferedReader().readLines() }.getOrDefault(listOf("No changelog in this build."))
+    val text = remember {
+        runCatching { context.assets.open("CHANGELOG.md").bufferedReader().readText() }.getOrDefault("No changelog in this build.")
     }
+    // From the first version heading: the file's own introduction is for editors.
+    val blocks = remember(text) { noteBlocks(text).dropWhile { !(it is NoteBlock.Heading && it.level == 2) } }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         SheetTitle("What's new")
-        LazyColumn(Modifier.heightIn(max = 600.dp).navigationBarsPadding().padding(horizontal = 24.dp)) {
-            items(lines.dropWhile { !it.startsWith("## ") }) { line ->
-                when {
-                    line.startsWith("## ") -> Text(line.removePrefix("## "), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-                    line.startsWith("### ") -> Text(line.removePrefix("### "), style = MaterialTheme.typography.labelLarge, color = LocalPalette.current.orange, modifier = Modifier.padding(top = 8.dp))
-                    line.startsWith("- ") -> Text("• " + line.removePrefix("- ").replace("`", ""), fontSize = 14.sp, modifier = Modifier.padding(top = 2.dp))
-                    line.isBlank() -> Spacer(Modifier.size(4.dp))
-                    else -> Text(line.replace("`", ""), fontSize = 14.sp)
+        NoteList(blocks)
+    }
+}
+
+/** A newer release's own notes, from GitHub, and a link to its page. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ReleaseNotesSheet(release: Updates.Release, onDownload: () -> Unit, onDismiss: () -> Unit) {
+    val uri = LocalUriHandler.current
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        SheetTitle("What's new in ${release.version}")
+        val blocks = remember(release.notes) { noteBlocks(release.notes) }
+        if (blocks.isEmpty()) {
+            Text("This release has no notes.", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 24.dp))
+        } else {
+            Box(Modifier.weight(1f, fill = false)) { NoteList(blocks) }
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).navigationBarsPadding(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = { runCatching { uri.openUri(release.page) } }) { Text("Open on GitHub") }
+            TextButton(onClick = onDownload) { Text("Download") }
+        }
+    }
+}
+
+@Composable
+private fun NoteList(blocks: List<NoteBlock>) {
+    LazyColumn(Modifier.heightIn(max = 600.dp).padding(horizontal = 24.dp)) {
+        items(blocks) { block ->
+            when (block) {
+                is NoteBlock.Heading -> if (block.level <= 2) {
+                    Text(block.text, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+                } else {
+                    Text(block.text, style = MaterialTheme.typography.labelLarge, color = LocalPalette.current.orange, modifier = Modifier.padding(top = 10.dp))
                 }
+                is NoteBlock.Bullet -> Row(Modifier.padding(top = 4.dp)) {
+                    Text("•", fontSize = 14.sp, modifier = Modifier.padding(end = 8.dp))
+                    Text(block.text, fontSize = 14.sp)
+                }
+                is NoteBlock.Paragraph -> Text(block.text, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
             }
         }
+        item { Spacer(Modifier.size(16.dp)) }
     }
 }
 
@@ -339,4 +424,98 @@ fun ChangelogSheet(onDismiss: () -> Unit) {
 fun shareCsv(context: Context, name: String, csv: String) {
     val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "results" }.take(60)
     shareFile(context, "$safe.csv", csv.toByteArray(), "text/csv")
+}
+
+/** The open connection's statements as sent, newest first: open one, or copy it. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HistorySheet(model: AppViewModel, onDismiss: () -> Unit) {
+    var filter by remember { mutableStateOf("") }
+    var confirmClear by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) { SheetTitle("History", "${model.profile?.name}: exactly as sent") }
+            if (model.history.isNotEmpty()) {
+                TextButton(onClick = { confirmClear = true }, modifier = Modifier.padding(end = 12.dp)) { Text("Clear") }
+            }
+        }
+        OutlinedTextField(
+            value = filter,
+            onValueChange = { filter = it },
+            leadingIcon = { Icon(Icons.Default.Search, null) },
+            placeholder = { Text("Search") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        )
+        if (model.history.isEmpty()) {
+            Text(
+                "Nothing run on this connection yet. Every statement sent is kept here, newest first, with when it ran and what came of it.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(24.dp),
+            )
+        }
+        val shown = model.history.filter { filter.isBlank() || it.text.contains(filter.trim(), ignoreCase = true) }
+        val now = System.currentTimeMillis()
+        LazyColumn(Modifier.heightIn(max = 520.dp).navigationBarsPadding()) {
+            items(shown, key = { it.at.toString() + it.text.hashCode() }) { entry ->
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            model.openFromHistory(entry)
+                            onDismiss()
+                        }
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val palette = LocalPalette.current
+                        Icon(
+                            if (entry.error != null) Icons.Default.ErrorOutline else Icons.Default.CheckCircleOutline,
+                            contentDescription = if (entry.error != null) "Failed" else "Ran",
+                            tint = if (entry.error != null) palette.red else palette.green,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Text(outcome(entry), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(ago(now - entry.at), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        IconButton(onClick = { clipboard.setText(AnnotatedString(entry.text)) }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(18.dp))
+                        }
+                    }
+                    Text(entry.text, fontFamily = Mono, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                }
+                HorizontalDivider()
+            }
+        }
+    }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("Clear this connection's history?") },
+            text = { Text("The list on this phone goes; nothing on the server changes.") },
+            confirmButton = { TextButton(onClick = { model.clearHistory(); confirmClear = false }) { Text("Clear") } },
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+private fun outcome(entry: HistoryEntry): String {
+    val time = entry.elapsedMs?.let { " · ${it} ms" }.orEmpty()
+    return when {
+        entry.error != null -> entry.error.lineSequence().first()
+        entry.rows != null -> "%,d row%s%s".format(entry.rows, if (entry.rows == 1) "" else "s", if (entry.capped) ", capped" else "") + time
+        entry.affected != null -> "%,d affected".format(entry.affected) + time
+        else -> "Done$time"
+    }
+}
+
+private fun ago(ms: Long): String {
+    val minutes = ms / 60_000
+    return when {
+        minutes < 1 -> "now"
+        minutes < 60 -> "${minutes}m"
+        minutes < 24 * 60 -> "${minutes / 60}h"
+        else -> "${minutes / (24 * 60)}d"
+    }
 }

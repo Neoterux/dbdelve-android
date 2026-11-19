@@ -1,8 +1,12 @@
 package dev.dbdelve.android.ui
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
@@ -12,10 +16,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
@@ -30,13 +36,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import dev.dbdelve.android.AppViewModel
 import dev.dbdelve.android.Screen
+import dev.dbdelve.android.data.ClientCert
+import dev.dbdelve.android.data.Pem
 import dev.dbdelve.android.data.Profile
 import java.util.UUID
 import uniffi.dbdelve_core.Engine
@@ -62,11 +72,49 @@ fun ConnectionForm(model: AppViewModel, editing: Profile?, duplicate: Boolean) {
     var showPassword by remember { mutableStateOf(false) }
     var database by rememberSaveable { mutableStateOf(editing?.database ?: "") }
     var ssl by rememberSaveable { mutableStateOf(editing?.sslMode ?: SslMode.VERIFY_FULL) }
+    var caPem by rememberSaveable { mutableStateOf(editing?.caPem) }
+    // Like the password: never in saved state.
+    var clientCert by remember { mutableStateOf(editing?.let { model.clientCert(it) }?.cert) }
+    var clientKey by remember { mutableStateOf(editing?.let { model.clientCert(it) }?.key) }
+    var tlsError by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    fun read(uri: Uri?): String? = uri?.let {
+        runCatching { context.contentResolver.openInputStream(it)!!.use { input -> input.readBytes().toString(Charsets.UTF_8) } }
+            .onFailure { failure -> tlsError = "Couldn't read that file: ${failure.message}" }
+            .getOrNull()
+    }
+    val pickCa = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        read(uri)?.let { text ->
+            tlsError = if (Pem.certificates(text).isEmpty()) "That file holds no PEM certificate." else null
+            if (tlsError == null) caPem = text
+        }
+    }
+    val pickCert = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        read(uri)?.let { text ->
+            tlsError = if (Pem.certificates(text).isEmpty()) "That file holds no PEM certificate." else null
+            if (tlsError == null) {
+                clientCert = text
+                // A file with both, as some tools write it, sets the key too.
+                if (Pem.hasKey(text)) clientKey = text
+            }
+        }
+    }
+    val pickKey = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        read(uri)?.let { text ->
+            tlsError = when {
+                Pem.hasEncryptedKey(text) -> "That key has a passphrase. Remove it first: openssl pkey -in key.pem -out plain.pem"
+                !Pem.hasKey(text) -> "That file holds no PEM private key."
+                else -> null
+            }
+            if (tlsError == null) clientKey = text
+        }
+    }
     var mode by rememberSaveable { mutableStateOf(editing?.mode ?: Mode.READ_ONLY) }
 
     val portNumber = port.toIntOrNull()?.takeIf { it in 1..65535 }
     val databaseNeeded = engine == Engine.MONGO && database.isBlank()
-    val valid = name.isNotBlank() && host.isNotBlank() && portNumber != null && !databaseNeeded
+    val halfCert = (clientCert == null) != (clientKey == null)
+    val valid = name.isNotBlank() && host.isNotBlank() && portNumber != null && !databaseNeeded && !halfCert
 
     Scaffold(
         topBar = {
@@ -93,8 +141,10 @@ fun ConnectionForm(model: AppViewModel, editing: Profile?, duplicate: Boolean) {
                                     database = database.trim(),
                                     sslMode = ssl,
                                     mode = mode,
+                                    caPem = caPem,
                                 ),
                                 password,
+                                clientCert?.let { cert -> clientKey?.let { key -> ClientCert(cert, key) } },
                             )
                         },
                     ) { Text("Save") }
@@ -167,6 +217,40 @@ fun ConnectionForm(model: AppViewModel, editing: Profile?, duplicate: Boolean) {
                     SslMode.DISABLE -> "Password and rows cross the network unencrypted."
                 },
             )
+            if (ssl == SslMode.VERIFY_FULL) {
+                TlsFile(
+                    title = "Trusted CA",
+                    held = caPem?.let(Pem::describe),
+                    empty = "Public CAs only. For a server with your own or your company's CA, or a self-signed certificate, add that CA's certificate (or the server's own).",
+                    add = "Add CA certificate",
+                    onAdd = { pickCa.launch(arrayOf("*/*")) },
+                    onRemove = { caPem = null },
+                )
+                TlsFile(
+                    title = "Client certificate",
+                    held = clientCert?.let(Pem::describe),
+                    empty = "Only for a server that asks the client to prove who it is.",
+                    add = "Add certificate",
+                    onAdd = { pickCert.launch(arrayOf("*/*")) },
+                    onRemove = {
+                        clientCert = null
+                        clientKey = null
+                    },
+                )
+                if (clientCert != null) {
+                    TlsFile(
+                        title = "Client key",
+                        held = clientKey?.let { "Private key, stored sealed by this phone's Keystore" },
+                        empty = "The certificate's private key, unencrypted PEM.",
+                        add = "Add key",
+                        onAdd = { pickKey.launch(arrayOf("*/*")) },
+                        onRemove = { clientKey = null },
+                    )
+                }
+            } else if (caPem != null || clientCert != null) {
+                Hint("This connection's CA and client certificate are kept, and used again when TLS is back on.")
+            }
+            tlsError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
 
             if (creating) {
                 Label("Mode")
@@ -181,7 +265,13 @@ fun ConnectionForm(model: AppViewModel, editing: Profile?, duplicate: Boolean) {
                 }
             }
             if (!valid) {
-                Hint(if (databaseNeeded) "MongoDB needs a database." else "Name, host and a port from 1 to 65535 are required.")
+                Hint(
+                    when {
+                        databaseNeeded -> "MongoDB needs a database."
+                        halfCert -> "A client certificate needs its key."
+                        else -> "Name, host and a port from 1 to 65535 are required."
+                    },
+                )
             }
         }
     }
@@ -205,6 +295,27 @@ private fun Field(
         keyboardOptions = KeyboardOptions(keyboardType = keyboard, autoCorrectEnabled = false),
         modifier = modifier,
     )
+}
+
+/** A TLS file the connection holds, or a button to add one. */
+@Composable
+private fun TlsFile(title: String, held: String?, empty: String, add: String, onAdd: () -> Unit, onRemove: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(title, style = MaterialTheme.typography.bodyMedium)
+        if (held == null) {
+            Hint(empty)
+            OutlinedButton(onClick = onAdd) {
+                Icon(Icons.Filled.FileOpen, contentDescription = null, modifier = Modifier.padding(end = 8.dp))
+                Text(add)
+            }
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Hint(held)
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onRemove) { Text("Remove") }
+            }
+        }
+    }
 }
 
 @Composable

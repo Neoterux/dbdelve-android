@@ -78,6 +78,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import uniffi.dbdelve_core.NewValue
+import dev.dbdelve.android.EditReview
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.Checkbox
+import androidx.compose.ui.text.style.TextDecoration
+import kotlinx.coroutines.delay
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -103,7 +109,9 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.BookmarkAdd
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.CheckCircleOutline
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
@@ -118,6 +126,7 @@ import androidx.compose.material.icons.filled.TableRows
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VerticalAlignBottom
 import androidx.compose.material.icons.filled.ViewAgenda
+import androidx.compose.material.icons.filled.ViewColumn
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Badge
@@ -129,6 +138,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import dev.dbdelve.android.QueryInput
 import dev.dbdelve.android.AppViewModel
+import dev.dbdelve.android.Completion
 import dev.dbdelve.android.Pane
 import dev.dbdelve.android.PendingGate
 import dev.dbdelve.android.QueryTab
@@ -484,16 +494,70 @@ private fun Editor(model: AppViewModel) {
 
         val haptics = LocalHapticFeedback.current
         var savedOpen by remember { mutableStateOf(false) }
+        var historyOpen by remember { mutableStateOf(false) }
+        var bookmarksOpen by remember { mutableStateOf(false) }
+        var explainOpen by remember { mutableStateOf(false) }
+        var explainError by remember { mutableStateOf<String?>(null) }
         var saving by remember { mutableStateOf(false) }
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             RowLimit(model)
-            IconButton(onClick = { savedOpen = true }) { Icon(Icons.Default.Bookmarks, contentDescription = "Saved queries") }
-            IconButton(onClick = { saving = true }, enabled = tab.text.text.isNotBlank()) {
-                Icon(Icons.Default.BookmarkAdd, contentDescription = "Save this query")
+            IconButton(onClick = { historyOpen = true }) { Icon(Icons.Default.History, contentDescription = "History") }
+            Box {
+                IconButton(onClick = { explainOpen = true }, enabled = next != null && !model.running) {
+                    Icon(Icons.Default.AccountTree, contentDescription = "Explain")
+                }
+                DropdownMenu(expanded = explainOpen, onDismissRequest = { explainOpen = false }) {
+                    val mongo = engine == uniffi.dbdelve_core.Engine.MONGO
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text("Plan")
+                                Text("How it would run. Runs nothing.", fontSize = 12.sp, color = palette.faint)
+                            }
+                        },
+                        onClick = {
+                            explainOpen = false
+                            explainError = model.explain(analyze = false)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(if (mongo) "Plan with execution stats" else "Plan with timings (ANALYZE)")
+                                Text("Runs it to measure; a write still asks first.", fontSize = 12.sp, color = palette.faint)
+                            }
+                        },
+                        onClick = {
+                            explainOpen = false
+                            explainError = model.explain(analyze = true)
+                        },
+                    )
+                }
+            }
+            Box {
+                IconButton(onClick = { bookmarksOpen = true }) { Icon(Icons.Default.Bookmarks, contentDescription = "Saved queries") }
+                DropdownMenu(expanded = bookmarksOpen, onDismissRequest = { bookmarksOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Saved queries") },
+                        leadingIcon = { Icon(Icons.Default.Bookmarks, null) },
+                        onClick = {
+                            bookmarksOpen = false
+                            savedOpen = true
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Save this query") },
+                        leadingIcon = { Icon(Icons.Default.BookmarkAdd, null) },
+                        enabled = tab.text.text.isNotBlank(),
+                        onClick = {
+                            bookmarksOpen = false
+                            saving = true
+                        },
+                    )
+                }
             }
             Spacer(Modifier.weight(1f))
             if (model.running) {
@@ -510,7 +574,7 @@ private fun Editor(model: AppViewModel) {
                         model.runAtCursor()
                     },
                     enabled = next != null,
-                    contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp),
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                     Text("Run", modifier = Modifier.padding(start = 6.dp))
@@ -518,6 +582,15 @@ private fun Editor(model: AppViewModel) {
             }
         }
         if (savedOpen) SavedQueriesSheet(model) { savedOpen = false }
+        if (historyOpen) HistorySheet(model) { historyOpen = false }
+        explainError?.let { reason ->
+            AlertDialog(
+                onDismissRequest = { explainError = null },
+                title = { Text("Can't explain this") },
+                text = { Text(reason) },
+                confirmButton = { TextButton(onClick = { explainError = null }) { Text("OK") } },
+            )
+        }
         if (saving) {
             SaveQueryDialog(
                 initial = tab.title.takeUnless { it.startsWith("Query ") }.orEmpty(),
@@ -527,6 +600,7 @@ private fun Editor(model: AppViewModel) {
                 saving = false
             }
         }
+        Completions(model, tab)
         AccessoryKeys(tab) { model.edit(tab, it) }
     }
 }
@@ -550,6 +624,53 @@ private fun RowLimit(model: AppViewModel) {
 }
 
 /** The keys a soft keyboard buries two layers deep. */
+/**
+ * Table and column names for the word at the cursor, above the key row; a tap
+ * replaces the word with the name, quoted if the engine needs it.
+ */
+@Composable
+private fun Completions(model: AppViewModel, tab: QueryTab) {
+    val text = tab.text.text
+    val cursor = tab.text.selection.start
+    // Read the columns of tables as the text names them, once it settles.
+    LaunchedEffect(text, model.catalog) {
+        delay(300)
+        model.loadColumnsFor(text)
+    }
+    if (!tab.text.selection.collapsed) return
+    val found = remember(text, cursor, model.catalog, model.columnCache.toMap()) { model.completions(text, cursor) } ?: return
+    val (word, suggestions) = found
+    if (suggestions.isEmpty()) return
+    val palette = LocalPalette.current
+    LazyRow(
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(suggestions, key = { it.insert }) { suggestion ->
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier.clickable {
+                    val next = text.substring(0, word.start) + suggestion.insert + text.substring(cursor)
+                    val at = word.start + suggestion.insert.length
+                    model.edit(tab, TextFieldValue(next, TextRange(at)))
+                },
+            ) {
+                Row(Modifier.padding(horizontal = 10.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        if (suggestion.kind == Completion.Kind.TABLE) Icons.Default.TableChart else Icons.Default.ViewColumn,
+                        contentDescription = if (suggestion.kind == Completion.Kind.TABLE) "Table" else "Column",
+                        tint = if (suggestion.kind == Completion.Kind.TABLE) palette.blue else palette.aqua,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(suggestion.name, fontFamily = Mono, fontSize = 13.sp, modifier = Modifier.padding(start = 6.dp))
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AccessoryKeys(tab: QueryTab, onPress: (TextFieldValue) -> Unit) {
     val keys = listOf("⇥", "(", ")", "'", "\"", ";", "*", "=", ".", ",", "{", "}", "[", "]", ":", "$", "_", "←", "→")
@@ -646,12 +767,139 @@ private fun ResultsPane(model: AppViewModel) {
             Text(error, fontFamily = Mono, fontSize = 13.sp, modifier = Modifier.padding(vertical = 10.dp))
             tab?.ran?.let { Statement(it) }
         }
-        result != null -> Rows(result, tab?.title.orEmpty())
+        result != null -> Rows(model, tab!!, result, plan = tab.ran?.let(::isTextPlan) == true && result.columns.size == 1)
     }
+    model.editReview?.let { review -> EditReviewDialog(model, review) }
+}
+
+/** What an edited cell shows: its new value, as the grid writes values. */
+private fun NewValue.shown(): String? = when (this) {
+    is NewValue.Text -> value
+    is NewValue.Json -> value
+    is NewValue.Null -> null
+}
+
+/**
+ * The statements that write the edits back, exactly as they will run, before
+ * anything is sent. Run passes them through the gate, which asks for
+ * Read-write as it would for any typed UPDATE.
+ */
+@Composable
+private fun EditReviewDialog(model: AppViewModel, review: EditReview) {
+    val target = review.target
+    AlertDialog(
+        onDismissRequest = model::dismissEditReview,
+        title = { Text("Write ${review.rows} row${if (review.rows == 1) "" else "s"} back?") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "Each row of ${target.table} is named by its primary key (${target.key.joinToString(", ")}), " +
+                        "so each statement changes that one row at most. " +
+                        if (review.prepared.size > 1) {
+                            "They run in order; one that fails stops the rest."
+                        } else if (review.rows > 1) {
+                            "The server applies them together or not at all."
+                        } else {
+                            ""
+                        } + " Needs Read-write.",
+                    fontSize = 13.sp,
+                )
+                review.prepared.forEach { Statement(it.shown()) }
+            }
+        },
+        confirmButton = { TextButton(onClick = model::applyEdits) { Text("Run") } },
+        dismissButton = { TextButton(onClick = model::dismissEditReview) { Text("Cancel") } },
+    )
+}
+
+/** A value for one cell: text, NULL, or on MongoDB a JSON value. */
+@Composable
+fun EditValueDialog(
+    column: String,
+    typeTag: String,
+    current: String?,
+    mongo: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (NewValue) -> Unit,
+) {
+    var text by remember { mutableStateOf(current.orEmpty()) }
+    var isNull by remember { mutableStateOf(current == null) }
+    // On MongoDB a value is typed: anything but a string goes in as JSON.
+    var json by remember { mutableStateOf(mongo && typeTag.isNotEmpty() && typeTag != "string") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(column, fontFamily = Mono) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (typeTag.isNotEmpty()) Text(typeTag, fontFamily = Mono, fontSize = 12.sp, color = LocalPalette.current.faint)
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it; isNull = false },
+                    enabled = !isNull,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(fontFamily = Mono),
+                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp, max = 220.dp),
+                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = isNull, onCheckedChange = { isNull = it })
+                    Text("NULL")
+                    if (mongo) {
+                        Spacer(Modifier.weight(1f))
+                        Checkbox(checked = json, onCheckedChange = { json = it }, enabled = !isNull)
+                        Text("JSON value")
+                    }
+                }
+                Text(
+                    when {
+                        isNull -> "Sets it to NULL."
+                        mongo && json -> "Written as this JSON value: 12, true, {\"\$date\": \"2026-01-01T00:00:00Z\"}."
+                        mongo -> "Written as a string."
+                        else -> "Written as text; the server converts it to the column's type, as it would a typed value."
+                    },
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                onSave(
+                    when {
+                        isNull -> NewValue.Null
+                        mongo && json -> NewValue.Json(text)
+                        else -> NewValue.Text(text)
+                    },
+                )
+            }) { Text("Change") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** A plan the server returns as lines of text (Postgres, MySQL's ANALYZE), best read as text. */
+private fun isTextPlan(ran: String): Boolean = ran.trimStart().startsWith("EXPLAIN", ignoreCase = true)
+
+/** A text plan: one line per row, unwrapped, scrolled sideways rather than cut. */
+@Composable
+private fun PlanText(result: ResultSet) {
+    Text(
+        result.rows.joinToString("\n") { it.firstOrNull().orEmpty() },
+        fontFamily = Mono,
+        fontSize = 12.sp,
+        lineHeight = 17.sp,
+        softWrap = false,
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .horizontalScroll(rememberScrollState())
+            .padding(12.dp),
+    )
 }
 
 @Composable
-private fun Rows(result: ResultSet, title: String) {
+private fun Rows(model: AppViewModel, tab: QueryTab, result: ResultSet, plan: Boolean = false) {
+    val title = tab.title
+    val staged = { row: Int, column: Int -> tab.edits[row]?.get(result.columns[column].name) }
     val palette = LocalPalette.current
     val clipboard = LocalClipboardManager.current
     var records by remember { mutableStateOf(false) }
@@ -693,8 +941,39 @@ private fun Rows(result: ResultSet, title: String) {
         Box(Modifier.weight(1f)) {
             when {
                 result.columns.isEmpty() -> Centered(result.affected?.let { "$it rows affected" } ?: "Done")
-                records -> Records(result) { opened = it }
-                else -> Grid(result) { opened = it }
+                plan && !records -> PlanText(result)
+                records -> Records(result, staged) { opened = it }
+                else -> Grid(result, staged) { opened = it }
+            }
+        }
+        model.editMessage?.let { message ->
+            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(message, fontSize = 12.sp, modifier = Modifier.weight(1f), color = if (message.startsWith("Saved")) palette.green else palette.red)
+                IconButton(onClick = { model.editMessage = null }) { Icon(Icons.Default.Close, contentDescription = "Dismiss") }
+            }
+        }
+        if (tab.edits.isNotEmpty()) {
+            var refusal by remember { mutableStateOf<String?>(null) }
+            Row(
+                Modifier.fillMaxWidth().background(palette.orange.copy(alpha = 0.15f)).padding(horizontal = 12.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Edit, null, Modifier.size(18.dp), tint = palette.orange)
+                Text(
+                    "${tab.edits.size} row${if (tab.edits.size == 1) "" else "s"} changed",
+                    fontSize = 13.sp,
+                    modifier = Modifier.weight(1f).padding(start = 8.dp),
+                )
+                TextButton(onClick = { tab.edits.clear() }) { Text("Discard") }
+                Button(onClick = { refusal = model.reviewEdits(tab) }, enabled = !model.running) { Text("Review") }
+            }
+            refusal?.let { reason ->
+                AlertDialog(
+                    onDismissRequest = { refusal = null },
+                    title = { Text("Can't write these edits") },
+                    text = { Text(reason) },
+                    confirmButton = { TextButton(onClick = { refusal = null }) { Text("OK") } },
+                )
             }
         }
         Row(
@@ -711,7 +990,36 @@ private fun Rows(result: ResultSet, title: String) {
             Text("${result.elapsedMs} ms", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
-    opened?.let { index -> RowSheet(result, index, copy) { opened = null } }
+    var editing by remember(result) { mutableStateOf<Pair<Int, Int>?>(null) }
+    opened?.let { index ->
+        RowSheet(
+            result,
+            index,
+            copy,
+            editing = tab.source?.let {
+                RowEditing(
+                    key = tab.editTarget?.key,
+                    notEditable = tab.notEditable,
+                    staged = tab.edits[index].orEmpty(),
+                    onEdit = { column -> editing = index to column },
+                )
+            },
+        ) { opened = null }
+    }
+    editing?.let { (row, column) ->
+        val name = result.columns[column].name
+        val staged = tab.edits[row]?.get(name)
+        EditValueDialog(
+            column = name,
+            typeTag = result.columns[column].typeTag,
+            current = if (staged != null) staged.shown() else result.rows[row][column],
+            mongo = model.session?.engine() == uniffi.dbdelve_core.Engine.MONGO,
+            onDismiss = { editing = null },
+        ) { value ->
+            model.stageEdit(tab, row, name, value)
+            editing = null
+        }
+    }
 }
 
 private const val CHAR_DP = 8.4f
@@ -720,7 +1028,7 @@ private const val CHAR_DP = 8.4f
 private const val CLIPBOARD_LIMIT = 200_000
 
 @Composable
-private fun Grid(result: ResultSet, open: (Int) -> Unit) {
+private fun Grid(result: ResultSet, staged: (Int, Int) -> NewValue?, open: (Int) -> Unit) {
     val palette = LocalPalette.current
     // Wide enough for what most of the column holds, not for its longest value.
     val widths = remember(result) {
@@ -739,7 +1047,9 @@ private fun Grid(result: ResultSet, open: (Int) -> Unit) {
             Row(Modifier.height(34.dp)) {
                 Cell("${index + 1}", numberWidth, palette.faint)
                 Row(Modifier.horizontalScroll(across)) {
-                    row.forEachIndexed { at, value ->
+                    row.forEachIndexed { at, read ->
+                        val change = staged(index, at)
+                        val value = change?.shown() ?: read.takeIf { change == null }
                         val numeric = value?.toDoubleOrNull() != null
                         Box(
                             Modifier
@@ -757,10 +1067,12 @@ private fun Grid(result: ResultSet, open: (Int) -> Unit) {
                                 overflow = TextOverflow.Ellipsis,
                                 fontStyle = if (value == null) FontStyle.Italic else FontStyle.Normal,
                                 color = when {
+                                    change != null -> palette.orange
                                     value == null -> palette.faint
                                     numeric -> palette.yellow
                                     else -> MaterialTheme.colorScheme.onSurface
                                 },
+                                textDecoration = if (change != null) TextDecoration.Underline else null,
                             )
                         }
                     }
@@ -814,14 +1126,16 @@ private fun Cell(text: String, width: androidx.compose.ui.unit.Dp, color: androi
 }
 
 @Composable
-private fun Records(result: ResultSet, open: (Int) -> Unit) {
+private fun Records(result: ResultSet, staged: (Int, Int) -> NewValue?, open: (Int) -> Unit) {
     val palette = LocalPalette.current
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         itemsIndexed(result.rows) { index, row ->
             Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = RoundedCornerShape(8.dp)) {
                 Column(Modifier.fillMaxWidth().padding(10.dp)) {
                     Text("#${index + 1}", fontFamily = Mono, fontSize = 11.sp, color = palette.faint)
-                    row.forEachIndexed { at, value ->
+                    row.forEachIndexed { at, read ->
+                        val change = staged(index, at)
+                        val value = change?.shown() ?: read.takeIf { change == null }
                         Row(Modifier.fillMaxWidth().clickable { open(index) }.padding(vertical = 2.dp)) {
                             Text(result.columns[at].name, fontFamily = Mono, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.width(120.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(
@@ -829,7 +1143,11 @@ private fun Records(result: ResultSet, open: (Int) -> Unit) {
                                 fontFamily = Mono,
                                 fontSize = 12.sp,
                                 fontStyle = if (value == null) FontStyle.Italic else FontStyle.Normal,
-                                color = if (value == null) palette.faint else MaterialTheme.colorScheme.onSurface,
+                                color = when {
+                                    change != null -> palette.orange
+                                    value == null -> palette.faint
+                                    else -> MaterialTheme.colorScheme.onSurface
+                                },
                                 maxLines = 3,
                                 overflow = TextOverflow.Ellipsis,
                             )

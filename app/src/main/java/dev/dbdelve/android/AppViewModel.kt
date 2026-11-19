@@ -2,12 +2,14 @@ package dev.dbdelve.android
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
+import dev.dbdelve.android.data.ClientCert
+import dev.dbdelve.android.data.HistoryEntry
+import dev.dbdelve.android.data.HistoryStore
 import dev.dbdelve.android.data.Profile
 import dev.dbdelve.android.data.ProfileStore
 import dev.dbdelve.android.data.Secrets
@@ -18,7 +20,10 @@ import dev.dbdelve.android.data.SharedConnection
 import dev.dbdelve.android.data.TabStore
 import dev.dbdelve.android.data.UpdateStore
 import dev.dbdelve.android.data.Updates
+import java.io.File
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -26,21 +31,36 @@ import kotlinx.coroutines.withContext
 import uniffi.dbdelve_core.Account
 import uniffi.dbdelve_core.Binding
 import uniffi.dbdelve_core.CatalogEntry
+import uniffi.dbdelve_core.CellEdit
 import uniffi.dbdelve_core.CoreException
 import uniffi.dbdelve_core.Destructive
 import uniffi.dbdelve_core.DbUser
+import uniffi.dbdelve_core.EditTarget
+import uniffi.dbdelve_core.KeyValue
 import uniffi.dbdelve_core.Mode
+import uniffi.dbdelve_core.NewValue
+import uniffi.dbdelve_core.ObjectKind
 import uniffi.dbdelve_core.Prepared
 import uniffi.dbdelve_core.ResultSet
+import uniffi.dbdelve_core.RowEdit
 import uniffi.dbdelve_core.RunOutcome
 import uniffi.dbdelve_core.Session
 import uniffi.dbdelve_core.Stop
 import uniffi.dbdelve_core.UserAction
 import uniffi.dbdelve_core.Verdict
+import uniffi.dbdelve_core.explainStatement
 import uniffi.dbdelve_core.fillParameters
 import uniffi.dbdelve_core.openConnections
 import uniffi.dbdelve_core.sealConnections
 import uniffi.dbdelve_core.statementAt
+
+/**
+ * Where a tab's rows can be written back to: a table the app queried itself
+ * (the builder's query, a table's preview), with the exact statement it
+ * wrote. Rows from that statement can be edited once the table's primary key
+ * is known and every key column is in them.
+ */
+data class EditSource(val schema: String, val table: String, val statement: String)
 
 class QueryTab(val id: Long, title: String, text: String) {
     var title by mutableStateOf(title)
@@ -49,7 +69,18 @@ class QueryTab(val id: Long, title: String, text: String) {
     var error by mutableStateOf<String?>(null)
     /** What was sent, exactly, so the results say what produced them. */
     var ran by mutableStateOf<String?>(null)
+
+    var source: EditSource? = null
+    /** Set once [result] is known to come, whole-keyed, from [source]'s table. */
+    var editTarget by mutableStateOf<EditTarget?>(null)
+    /** Why [result] cannot be edited, when it came from a table that could be. */
+    var notEditable by mutableStateOf<String?>(null)
+    /** Changed values by row of [result], then column name. */
+    val edits = mutableStateMapOf<Int, Map<String, NewValue>>()
 }
+
+/** Edits built and checked, waiting for the user to read them. */
+class EditReview(val tab: QueryTab, val target: EditTarget, val prepared: List<Prepared>, val rows: Int)
 
 /**
  * A statement the gate stopped, held while the user answers. Nothing was
@@ -84,19 +115,44 @@ fun Throwable.reason(): String = when (this) {
     else -> message ?: toString()
 }
 
+/**
+ * The app's state and its open session, for the whole process rather than for
+ * one screen: [DBDelveApp] holds it, so an activity Android destroys (a back
+ * gesture, swiping the app from recents, a reclaimed task) leaves a running
+ * statement running. [QueryService] keeps the process at foreground priority
+ * while one does, and a new activity picks up the same session, tabs and
+ * results. When the screen goes for good, [screenGone] closes the session,
+ * at once or when the statement running ends.
+ */
 class AppViewModel(
     private val store: ProfileStore,
     private val secrets: Secrets,
     private val tabStore: TabStore,
     private val savedStore: SavedQueryStore,
+    private val historyStore: HistoryStore,
     private val updates: UpdateStore,
     /** This build's versionName, which releases are compared against. */
     val installedVersion: String,
+    /**
+     * App-private, out of backups: MySQL's and MongoDB's drivers read TLS
+     * material only from files, which the core writes here for a session's
+     * life and deletes when it closes.
+     */
+    private val tlsDir: File,
     /** Called with the connection's name while a statement runs, null after. */
     private val keepAlive: (connection: String?) -> Unit,
-) : ViewModel() {
+) {
+    /** Lives as long as the process; the main thread, as Compose state wants. */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
     var profiles by mutableStateOf(store.load())
         private set
+
+    init {
+        // A process that died with a session open left its TLS files; none is
+        // open yet in this one.
+        tlsDir.listFiles()?.forEach { it.delete() }
+    }
     var screen by mutableStateOf<Screen>(Screen.Connections)
     var connecting by mutableStateOf<String?>(null)
         private set
@@ -128,10 +184,11 @@ class AppViewModel(
 
     val tab: QueryTab? get() = tabs.getOrNull(current)
 
-    fun saveProfile(profile: Profile, password: String?) {
+    fun saveProfile(profile: Profile, password: String?, clientCert: ClientCert?) {
         // The password is written first: a profile saved without its password
         // would connect with a blank one, which is valid, and wrong.
         password?.let { secrets.setPassword(profile.id, it) }
+        secrets.setClientCert(profile.id, clientCert)
         val next = profiles.filterNot { it.id == profile.id } + profile
         profiles = next.sortedWith(compareBy({ it.project }, { it.name }))
         store.save(profiles)
@@ -145,11 +202,15 @@ class AppViewModel(
      */
     fun password(profile: Profile): String = runCatching { secrets.password(profile.id) }.getOrDefault("")
 
+    /** The saved client certificate, or none when the Keystore can no longer open it. */
+    fun clientCert(profile: Profile): ClientCert? = runCatching { secrets.clientCert(profile.id) }.getOrNull()
+
     fun deleteProfile(profile: Profile) {
         profiles = profiles.filterNot { it.id == profile.id }
         store.save(profiles)
         secrets.forget(profile.id)
         tabStore.forget(profile.id)
+        historyStore.forget(profile.id)
         allSaved = allSaved.filterNot { it.profileId == profile.id }
         savedStore.save(allSaved)
     }
@@ -162,7 +223,9 @@ class AppViewModel(
     suspend fun exportConnections(chosen: List<Profile>, withPasswords: Boolean, passphrase: String): Result<ByteArray> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val shared = chosen.map { SharedConnection(it, if (withPasswords) password(it) else null) }
+                val shared = chosen.map {
+                    SharedConnection(it, if (withPasswords) password(it) else null, if (withPasswords) clientCert(it) else null)
+                }
                 sealConnections(ConnectionBundle.toJson(shared), passphrase)
             }
         }
@@ -193,6 +256,7 @@ class AppViewModel(
                 else -> shared.profile.copy(name = uniqueName(shared.profile.name, next))
             }
             shared.password?.let { secrets.setPassword(profile.id, it) }
+            shared.clientCert?.let { secrets.setClientCert(profile.id, it) }
             next = next.filterNot { it.id == profile.id } + profile
             imported++
         }
@@ -251,9 +315,12 @@ class AppViewModel(
         if (connecting != null) return
         connecting = profile.id
         connectError = null
-        viewModelScope.launch {
+        scope.launch {
             val opened = withContext(Dispatchers.IO) {
-                runCatching { Session.connect(profile.config(secrets.password(profile.id)), profile.mode) }
+                runCatching {
+                    val config = profile.config(secrets.password(profile.id), secrets.clientCert(profile.id), tlsDir.path)
+                    Session.connect(config, profile.mode)
+                }
             }
             connecting = null
             opened.onSuccess { opened ->
@@ -261,6 +328,7 @@ class AppViewModel(
                 this@AppViewModel.profile = profile
                 mode = profile.mode
                 restoreTabs(profile)
+                history = withContext(Dispatchers.IO) { historyStore.load(profile.id) }
                 builder = BuilderState()
                 input = QueryInput.TEXT
                 pane = Pane.QUERY
@@ -277,13 +345,18 @@ class AppViewModel(
         running = false
         profile = null
         catalog = emptyList()
+        columnCache.clear()
+        keys.clear()
+        editReview = null
+        editMessage = null
+        history = emptyList()
         gate = null
         users = emptyList()
         grants = emptyMap()
         review = null
         userMessage = null
         screen = Screen.Connections
-        viewModelScope.launch(Dispatchers.IO) { closing?.close() }
+        scope.launch(Dispatchers.IO) { closing?.close() }
     }
 
     fun newTab(title: String = "Query ${nextTabId + 1}", text: String = ""): QueryTab {
@@ -336,10 +409,186 @@ class AppViewModel(
         val snapshot = tabs.map { TabStore.Saved(it.title, it.text.text) }
         val at = current
         saving?.cancel()
-        saving = viewModelScope.launch {
+        saving = scope.launch {
             if (!now) delay(600)
             withContext(Dispatchers.IO) { tabStore.save(id, snapshot, at) }
         }
+    }
+
+    /** The open connection's statements as sent, newest first. */
+    var history by mutableStateOf<List<HistoryEntry>>(emptyList())
+        private set
+
+    /** Keeps what was sent and what came of it, for this connection. */
+    private fun record(statement: String, sent: Long, result: ResultSet?, error: String?) {
+        val id = profile?.id ?: return
+        val entry = HistoryEntry(
+            text = statement,
+            at = sent,
+            elapsedMs = result?.elapsedMs?.toLong(),
+            rows = result?.takeIf { it.columns.isNotEmpty() }?.rows?.size,
+            capped = result?.capped == true,
+            affected = result?.affected?.toLong(),
+            error = error?.take(HistoryStore.ERROR_CHARS),
+        )
+        // A statement run again moves to the top rather than filling the list.
+        history = (listOf(entry) + history.filterNot { it.text == statement }).take(HistoryStore.LIMIT)
+        val snapshot = history
+        scope.launch(Dispatchers.IO) { historyStore.save(id, snapshot) }
+    }
+
+    fun clearHistory() {
+        val id = profile?.id ?: return
+        history = emptyList()
+        scope.launch(Dispatchers.IO) { historyStore.forget(id) }
+    }
+
+    /** A statement from history in a tab of its own, to read, edit or run. */
+    fun openFromHistory(entry: HistoryEntry) {
+        newTab("History", entry.text)
+        input = QueryInput.TEXT
+        pane = Pane.QUERY
+    }
+
+    /**
+     * Explains the statement under the cursor: `EXPLAIN` (or MongoDB's
+     * `.explain()`) on a copy, sent like anything typed, its plan shown as
+     * this tab's result. The text in the editor is never touched. With
+     * [analyze] it runs the statement for its timings, and the gate then
+     * treats it as the statement itself. Returns why it could not, or null.
+     */
+    fun explain(analyze: Boolean): String? {
+        val tab = tab ?: return null
+        val session = session ?: return "Not connected."
+        val text = tab.text.text
+        val span = statementAt(session.engine(), text, tab.text.selection.start.toUInt()) ?: return "Nothing to explain."
+        val statement = text.substring(span.start.toInt(), span.end.toInt())
+        val explained = runCatching { explainStatement(session.engine(), statement, analyze) }.getOrElse { return it.reason() }
+        execute(tab, explained, emptyList(), runOnce = false, onceIn = null)
+        return null
+    }
+
+    /** Primary keys by schema and table, read once per connection. */
+    private val keys = mutableMapOf<Pair<String, String>, List<String>>()
+
+    /**
+     * Whether [result] can be edited: it came from the statement the app
+     * wrote for [QueryTab.source], the table has a primary key, and every
+     * key column is in the rows exactly once.
+     */
+    private fun resolveEditTarget(tab: QueryTab, statement: String, result: ResultSet) {
+        tab.editTarget = null
+        tab.notEditable = null
+        val source = tab.source ?: return
+        if (source.statement != statement) return
+        val session = session ?: return
+        scope.launch {
+            val table = source.schema to source.table
+            val key = keys[table] ?: withContext(Dispatchers.IO) {
+                runCatching { session.primaryKey(source.schema, source.table) }.getOrNull()
+            }?.also { keys[table] = it }
+            if (tab.result !== result) return@launch
+            val names = result.columns.map { it.name }
+            tab.notEditable = when {
+                key == null -> "Couldn't read ${source.table}'s primary key."
+                key.isEmpty() -> "${source.table} has no primary key, so a row can't be named for sure."
+                key.any { k -> names.count { it == k } != 1 } -> "Include ${key.joinToString(", ")} (the primary key) in the columns to edit rows."
+                else -> null
+            }
+            if (tab.notEditable == null && key != null) tab.editTarget = EditTarget(source.schema, source.table, key)
+        }
+    }
+
+    /** Changes a value of a row, or takes the change back when it is the value as read. */
+    fun stageEdit(tab: QueryTab, row: Int, column: String, value: NewValue) {
+        val result = tab.result ?: return
+        val at = result.columns.indexOfFirst { it.name == column }
+        val original = result.rows.getOrNull(row)?.getOrNull(at)
+        val unchanged = when (value) {
+            is NewValue.Null -> original == null
+            is NewValue.Text -> original == value.value
+            is NewValue.Json -> original == value.value
+        }
+        val changes = tab.edits[row].orEmpty().toMutableMap()
+        if (unchanged) changes.remove(column) else changes[column] = value
+        if (changes.isEmpty()) tab.edits.remove(row) else tab.edits[row] = changes
+    }
+
+    var editReview by mutableStateOf<EditReview?>(null)
+        private set
+    var editMessage by mutableStateOf<String?>(null)
+
+    /** Builds the statements for the tab's edits and holds them for review. Returns why not, or null. */
+    fun reviewEdits(tab: QueryTab): String? {
+        val session = session ?: return "Not connected."
+        val target = tab.editTarget ?: return tab.notEditable ?: "These rows can't be edited."
+        val result = tab.result ?: return "No rows."
+        val rows = tab.edits.toSortedMap().map { (row, changes) ->
+            val cells = result.rows[row]
+            RowEdit(
+                key = target.key.map { k ->
+                    val at = result.columns.indexOfFirst { it.name == k }
+                    val value = cells[at] ?: return "Row ${row + 1} has no ${k}: a NULL key names no row."
+                    KeyValue(k, value, result.columns[at].typeTag)
+                },
+                changes = changes.map { (column, value) -> CellEdit(column, value) },
+            )
+        }
+        val prepared = runCatching { session.prepareEdits(target, rows) }.getOrElse { return it.reason() }
+        editReview = EditReview(tab, target, prepared, rows.size)
+        return null
+    }
+
+    fun dismissEditReview() {
+        editReview?.prepared?.forEach { it.close() }
+        editReview = null
+    }
+
+    /**
+     * Runs the reviewed statements in order, each through the gate (which
+     * asks for Read-write), then reads the rows again. A failure stops there
+     * and says which; the edits are kept to try again.
+     */
+    fun applyEdits() {
+        val review = editReview ?: return
+        editReview = null
+        applyEdit(review, 0, null)
+    }
+
+    private fun applyEdit(review: EditReview, at: Int, onceIn: Mode?) {
+        val tab = review.tab
+        if (at == review.prepared.size) {
+            editMessage = "Saved ${review.rows} row${if (review.rows == 1) "" else "s"} of ${review.target.table}."
+            tab.edits.clear()
+            review.prepared.forEach { it.close() }
+            // Read the rows again, by the same statement: what is on screen
+            // is then what the server holds.
+            tab.source?.let { execute(tab, it.statement, emptyList(), runOnce = false, onceIn = null) }
+            return
+        }
+        val prepared = review.prepared[at]
+        val sent = System.currentTimeMillis()
+        send(
+            shown = prepared.shown(),
+            confirmed = emptyList(),
+            onceIn = onceIn,
+            // The user read every statement in the review: an answer to the
+            // gate holds for the rest of them.
+            retry = { _, _, mode -> applyEdit(review, at, mode) },
+            call = { it.runPrepared(prepared, emptyList(), onceIn) },
+            done = { result ->
+                record(prepared.shown(), sent, result, null)
+                applyEdit(review, at + 1, onceIn)
+            },
+            failed = { reason ->
+                record(prepared.shown(), sent, null, reason)
+                editMessage = if (review.prepared.size > 1) {
+                    "Edit ${at + 1} of ${review.prepared.size} failed, and the rest were not sent: $reason"
+                } else {
+                    "The edit failed: $reason"
+                }
+            },
+        )
     }
 
     /** Runs the statement under the cursor, as typed. */
@@ -359,6 +608,7 @@ class AppViewModel(
         onceIn: Mode?,
     ) {
         val limit = rowLimit.toUInt()
+        val sent = System.currentTimeMillis()
         send(
             shown = statement,
             confirmed = confirmed,
@@ -366,12 +616,18 @@ class AppViewModel(
             retry = { again, once, mode -> execute(tab, statement, again, once, mode) },
             call = { it.run(statement, limit, confirmed, runOnce, onceIn) },
             done = { result ->
+                record(statement, sent, result, null)
                 tab.result = result
                 tab.error = null
                 tab.ran = statement
+                tab.edits.clear()
+                resolveEditTarget(tab, statement, result)
                 pane = Pane.RESULTS
             },
             failed = { reason ->
+                record(statement, sent, null, reason)
+                tab.edits.clear()
+                tab.editTarget = null
                 tab.error = reason
                 tab.ran = statement
                 pane = Pane.RESULTS
@@ -393,15 +649,11 @@ class AppViewModel(
         if (running) return
         running = true
         keepAlive(profile?.name)
-        // ponytail: the service keeps the process alive, but the session lives
-        // in the view model, so a statement still ends if Android destroys the
-        // activity outright. A service that owns the session is the upgrade path.
-        viewModelScope.launch {
+        scope.launch {
             val outcome = try {
                 withContext(Dispatchers.IO) { runCatching { call(session) } }
             } finally {
-                // Also when the view model is cleared mid-statement (the app
-                // swiped away): otherwise the foreground service outlives it.
+                // However it ends: otherwise the foreground service outlives it.
                 keepAlive(null)
                 if (this@AppViewModel.session === session) running = false
             }
@@ -415,6 +667,12 @@ class AppViewModel(
                         gate = PendingGate(shown, outcome.stop, outcome.verdict, confirmed, onceIn, retry)
                 }
             }.onFailure { failed(it.reason()) }
+            // The screen went while this ran: its outcome is kept (history),
+            // and now nothing is left to keep the connection open for.
+            if (closeWhenIdle) {
+                closeWhenIdle = false
+                disconnect()
+            }
         }
     }
 
@@ -465,7 +723,7 @@ class AppViewModel(
     fun refreshUsers() {
         val session = session ?: return
         refreshingUsers = true
-        viewModelScope.launch {
+        scope.launch {
             val listed = withContext(Dispatchers.IO) { runCatching { session.users() } }
             refreshingUsers = false
             listed.onSuccess {
@@ -477,7 +735,7 @@ class AppViewModel(
 
     fun loadGrants(account: Account) {
         val session = session ?: return
-        viewModelScope.launch {
+        scope.launch {
             val read = withContext(Dispatchers.IO) { runCatching { session.userGrants(account) } }
             grants = grants + (account to read.getOrElse { listOf(it.reason()) })
         }
@@ -486,7 +744,7 @@ class AppViewModel(
     /** Builds the statement for [action] and holds it for the user to read. */
     fun prepare(title: String, action: UserAction) {
         val session = session ?: return
-        viewModelScope.launch {
+        scope.launch {
             val built = withContext(Dispatchers.IO) { runCatching { session.prepareUser(action) } }
             built.onSuccess { review = Review(title, it) }
                 .onFailure { userMessage = it.reason() }
@@ -529,7 +787,7 @@ class AppViewModel(
     fun setMode(next: Mode, then: () -> Unit = {}) {
         val session = session ?: return
         val profile = profile ?: return
-        viewModelScope.launch {
+        scope.launch {
             val changed = withContext(Dispatchers.IO) { runCatching { session.setMode(next) } }
             // It may complete after the user left this connection: the
             // profile still takes the mode, the screen of another does not.
@@ -560,13 +818,52 @@ class AppViewModel(
     fun refreshCatalog() {
         val session = session ?: return
         refreshingCatalog = true
-        viewModelScope.launch {
+        scope.launch {
             val listed = withContext(Dispatchers.IO) { runCatching { session.catalog() } }
             refreshingCatalog = false
             listed.onSuccess {
                 catalog = it
+                // Tables may have changed: their columns are read again as named.
+                columnCache.clear()
                 catalogError = null
             }.onFailure { catalogError = it.reason() }
+        }
+    }
+
+    /** Column names by table name, read as the editor's text names tables. */
+    val columnCache = mutableStateMapOf<String, List<String>>()
+    private val columnsLoading = mutableSetOf<String>()
+
+    /** Names to complete the word at the cursor with: see [Completion]. */
+    fun completions(text: String, cursor: Int): Pair<Completion.Word, List<Completion.Suggestion>>? {
+        val engine = session?.engine() ?: return null
+        val word = Completion.word(text, cursor) ?: return null
+        val tables = catalog.map { it.name }.distinct()
+        return word to Completion.suggest(engine, text, word, tables, columnsOf = { columnCache[it] })
+    }
+
+    /**
+     * Reads the columns of the tables [text] names, each once per connection,
+     * so completion can offer them. Not while a statement runs: the session
+     * would only queue the read behind it.
+     */
+    fun loadColumnsFor(text: String) {
+        val session = session ?: return
+        if (running) return
+        val engine = session.engine()
+        val names = catalog.map { it.name }.distinct()
+        val wanted = Completion.referenced(engine, text, names).toMutableSet()
+        Completion.word(text, text.length)?.qualifier?.let { alias -> Completion.aliased(text, alias, names)?.let(wanted::add) }
+        for (name in wanted) {
+            if (name in columnCache || !columnsLoading.add(name)) continue
+            val entry = catalog.firstOrNull { it.name == name } ?: continue
+            scope.launch {
+                val read = withContext(Dispatchers.IO) { runCatching { session.columns(entry.schema, entry.name) } }
+                columnsLoading.remove(name)
+                if (this@AppViewModel.session !== session) return@launch
+                // A failed read leaves nothing to offer, quietly: completion is a help.
+                columnCache[name] = read.getOrNull()?.map { it.name }.orEmpty()
+            }
         }
     }
 
@@ -583,7 +880,7 @@ class AppViewModel(
         builder = state
         input = QueryInput.BUILDER
         pane = Pane.QUERY
-        viewModelScope.launch {
+        scope.launch {
             val read = withContext(Dispatchers.IO) { runCatching { session.columns(entry.schema, entry.name) } }
             if (builder !== state) return@launch
             state.loadingColumns = false
@@ -603,6 +900,8 @@ class AppViewModel(
         val filled = runCatching { fillParameters(session.engine(), built.text, builder.bindings(built)) }
             .getOrElse { return it.reason() }
         val tab = newTab(entry.name, filled)
+        // A count or a grouping names no row: only plain reads are editable.
+        if (!builder.aggregates) tab.source = EditSource(entry.schema, entry.name, filled)
         input = QueryInput.TEXT
         if (run) execute(tab, filled, emptyList(), runOnce = false, onceIn = null) else pane = Pane.QUERY
         return null
@@ -620,6 +919,7 @@ class AppViewModel(
         val session = session ?: return
         val text = session.preview(entry.schema, entry.name, rowLimit.toUInt())
         val tab = newTab(entry.name, text)
+        if (entry.kind != ObjectKind.VIEW) tab.source = EditSource(entry.schema, entry.name, text)
         execute(tab, text, emptyList(), runOnce = false, onceIn = null)
     }
 
@@ -649,7 +949,7 @@ class AppViewModel(
         if (checkingUpdates) return
         if (!manual && (!updates.automatic || System.currentTimeMillis() - updates.lastCheck < UPDATE_INTERVAL)) return
         checkingUpdates = true
-        viewModelScope.launch {
+        scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { Updates.fetchLatest() } }
             checkingUpdates = false
             result.onSuccess { latest ->
@@ -672,8 +972,22 @@ class AppViewModel(
         update = null
     }
 
-    override fun onCleared() {
-        session?.close()
+    /** Set when the screen went for good mid-statement: disconnect once it ends. */
+    private var closeWhenIdle = false
+
+    /** A screen is showing this state again: whatever it holds stays open. */
+    fun screenShown() {
+        closeWhenIdle = false
+    }
+
+    /**
+     * The last screen finished for good (not a rotation). A statement running
+     * runs on, and the session closes when it ends; otherwise now, so a
+     * cached process does not hold a server connection nobody can see.
+     */
+    fun screenGone() {
+        if (session == null) return
+        if (running) closeWhenIdle = true else disconnect()
     }
 
     private companion object {

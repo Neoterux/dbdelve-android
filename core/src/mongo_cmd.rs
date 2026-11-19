@@ -73,6 +73,53 @@ pub struct Command {
     /// None for the database's own methods.
     pub collection: Option<String>,
     pub call: Call,
+    /// `.explain(…)` after a read: the plan, not the documents, at this
+    /// verbosity (`queryPlanner` or `executionStats`).
+    pub explain: Option<Verbosity>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verbosity {
+    /// The plan the server would choose, without running it.
+    QueryPlanner,
+    /// The plan run, with what each stage read and returned.
+    ExecutionStats,
+}
+
+impl Verbosity {
+    pub fn name(self) -> &'static str {
+        match self {
+            Verbosity::QueryPlanner => "queryPlanner",
+            Verbosity::ExecutionStats => "executionStats",
+        }
+    }
+}
+
+/// The call and the verbosity of an `.explain(…)` that ends the text, if
+/// one does and what comes before it is a command of its own. Anything else
+/// is left to read as written, which a stray `.explain(` in a string then
+/// fails, never quietly misreads.
+fn explained(text: &str) -> Option<(&str, Verbosity)> {
+    let at = text.rfind(".explain(")?;
+    let argument = text[at + ".explain(".len()..].strip_suffix(')')?.trim();
+    let verbosity = match argument {
+        "" => Verbosity::QueryPlanner,
+        quoted => match json5::from_str::<String>(quoted).ok()?.as_str() {
+            "queryPlanner" => Verbosity::QueryPlanner,
+            "executionStats" => Verbosity::ExecutionStats,
+            _ => return None,
+        },
+    };
+    Some((&text[..at], verbosity))
+}
+
+/// `.explain(…)` runs what it explains with `executionStats`, so only a read
+/// may be explained here: a find, an aggregate or a count.
+pub fn explainable(call: &Call) -> bool {
+    matches!(
+        call,
+        Call::Find { .. } | Call::Aggregate { .. } | Call::Count { .. }
+    )
 }
 
 /// The database's methods, called as `db.<method>(…)`: users only.
@@ -87,6 +134,19 @@ const DATABASE_METHODS: &[&str] = &[
 
 pub fn parse(text: &str) -> Result<Command, String> {
     let text = text.trim().trim_end_matches(';').trim_end();
+    if let Some((inner, verbosity)) = explained(text)
+        && let Ok(mut command) = parse_call(inner)
+    {
+        if !explainable(&command.call) {
+            return Err("Only find, aggregate and countDocuments can be explained here.".into());
+        }
+        command.explain = Some(verbosity);
+        return Ok(command);
+    }
+    parse_call(text)
+}
+
+fn parse_call(text: &str) -> Result<Command, String> {
     let rest = text
         .strip_prefix("db.")
         .ok_or("A MongoDB command starts with db.<collection>.")?;
@@ -197,7 +257,11 @@ pub fn parse(text: &str) -> Result<Command, String> {
         _ if collection.is_none() => database_call(method, &args)?,
         other => return Err(format!("{other} is not a method this app runs.")),
     };
-    Ok(Command { collection, call })
+    Ok(Command {
+        collection,
+        call,
+        explain: None,
+    })
 }
 
 fn database_call(method: &str, args: &[Bson]) -> Result<Call, String> {
@@ -489,6 +553,29 @@ mod tests {
                 .collection
                 .as_deref(),
             Some("a.b")
+        );
+    }
+
+    #[test]
+    fn explain_reads_only_a_trailing_call_on_a_read() {
+        let plain = parse("db.c.find({a: 1}).explain()").unwrap();
+        assert_eq!(plain.explain, Some(Verbosity::QueryPlanner));
+        assert!(matches!(plain.call, Call::Find { .. }));
+        let stats = parse("db.c.aggregate([]).explain('executionStats')").unwrap();
+        assert_eq!(stats.explain, Some(Verbosity::ExecutionStats));
+        assert_eq!(classify("db.c.find({}).explain()"), Verdict::READ);
+        // A write's explain is refused, and its verdict is never a read's.
+        assert!(parse("db.c.deleteMany({}).explain()").is_err());
+        assert_ne!(
+            classify("db.c.deleteMany({}).explain()").mode,
+            crate::gate::Mode::ReadOnly
+        );
+        // `.explain(` inside a string is the string's.
+        let quoted = parse("db.c.find({a: '.explain('})").unwrap();
+        assert_eq!(quoted.explain, None);
+        assert!(
+            parse("db.c.find({}).explain('allPlans')").is_err(),
+            "unknown verbosity"
         );
     }
 }

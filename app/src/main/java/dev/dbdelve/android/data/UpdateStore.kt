@@ -26,13 +26,14 @@ class UpdateStore(context: Context) {
         get() {
             val version = prefs.getString("found_version", null) ?: return null
             val page = prefs.getString("found_page", null) ?: return null
-            return Updates.Release(version, page, prefs.getString("found_apk", null))
+            return Updates.Release(version, page, prefs.getString("found_apk", null), prefs.getString("found_notes", null).orEmpty())
         }
         set(value) {
             prefs.edit()
                 .putString("found_version", value?.version)
                 .putString("found_page", value?.page)
                 .putString("found_apk", value?.apk)
+                .putString("found_notes", value?.notes)
                 .apply()
         }
 }

@@ -1,11 +1,9 @@
 package dev.dbdelve.android
 
 import android.os.Bundle
-import java.io.File
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.viewModels
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_WEAK
 import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
@@ -13,13 +11,6 @@ import androidx.biometric.BiometricPrompt
 import androidx.compose.material3.Surface
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
-import androidx.lifecycle.viewmodel.initializer
-import androidx.lifecycle.viewmodel.viewModelFactory
-import dev.dbdelve.android.data.ProfileStore
-import dev.dbdelve.android.data.Secrets
-import dev.dbdelve.android.data.SavedQueryStore
-import dev.dbdelve.android.data.TabStore
-import dev.dbdelve.android.data.UpdateStore
 import dev.dbdelve.android.ui.ConnectionForm
 import dev.dbdelve.android.ui.ConnectionsScreen
 import dev.dbdelve.android.ui.DBDelveTheme
@@ -27,26 +18,12 @@ import dev.dbdelve.android.ui.WorkspaceScreen
 
 // A FragmentActivity because BiometricPrompt needs one.
 class MainActivity : FragmentActivity() {
-    private val model: AppViewModel by viewModels {
-        viewModelFactory {
-            initializer {
-                AppViewModel(
-                    ProfileStore(filesDir),
-                    Secrets(applicationContext),
-                    TabStore(File(filesDir, "tabs")),
-                    SavedQueryStore(filesDir),
-                    UpdateStore(applicationContext),
-                    packageManager.getPackageInfo(packageName, 0).versionName ?: "0",
-                ) { connection ->
-                    QueryService.keepAlive(applicationContext, connection)
-                }
-            }
-        }
-    }
+    private val model: AppViewModel get() = (application as DBDelveApp).model
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        model.screenShown()
         // Throttled and off when the user turned it off: see checkForUpdates.
         model.checkForUpdates(manual = false)
         setContent {
@@ -63,6 +40,12 @@ class MainActivity : FragmentActivity() {
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        // Gone for good, not rotated: see AppViewModel.screenGone.
+        if (isFinishing && !isChangingConfigurations) model.screenGone()
+        super.onDestroy()
     }
 
     /**

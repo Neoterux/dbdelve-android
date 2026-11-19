@@ -23,6 +23,11 @@ use crate::{ConnectionConfig, CoreError, Engine, SslMode};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How many MongoDB documents the builder reads fields from: enough that a
+/// field most documents lack still shows, few enough to stay quick on a
+/// phone. `$sample` picks them at random without scanning the collection.
+const COLUMN_SAMPLE: i32 = 100;
+
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Column {
     pub name: String,
@@ -96,6 +101,9 @@ pub struct Session {
     driver: Mutex<Driver>,
     mode: Mutex<Mode>,
     canceller: Canceller,
+    /// TLS files MySQL's and MongoDB's drivers read, kept until the session
+    /// closes: a side connection reads them again.
+    _tls_files: crate::tls::Files,
 }
 
 fn connect_error(message: impl ToString) -> CoreError {
@@ -117,16 +125,6 @@ fn runtime() -> Result<Runtime, CoreError> {
         .map_err(connect_error)
 }
 
-fn tls_config() -> rustls::ClientConfig {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .expect("ring supports the default protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth()
-}
-
 /// A TLS handshake MySQL 5.6 fails, named, instead of a bare alert: builds
 /// linked against yaSSL offer only TLS 1.0 and 1.1, which rustls refuses.
 fn mysql_tls_hint(error: mysql::Error, ssl: SslMode) -> CoreError {
@@ -146,30 +144,48 @@ fn mysql_tls_hint(error: mysql::Error, ssl: SslMode) -> CoreError {
              server, or reach it through a VPN or SSH tunnel with TLS off."
         ));
     }
-    connect_error(message)
+    connect_error(crate::tls::explained(&message))
 }
 
 fn postgres_error(error: tokio_postgres::Error) -> String {
     match error.as_db_error() {
         Some(db) => format!("{} {}: {}", db.severity(), db.code().code(), db.message()),
-        None => error.to_string(),
+        None => crate::tls::explained(&with_causes(&error)),
     }
+}
+
+/// An error and what caused it, which is where a TLS failure says why: the
+/// driver's own message is only "error performing TLS handshake".
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        let more = next.to_string();
+        if !text.contains(&more) {
+            text = format!("{text}: {more}");
+        }
+        cause = next.source();
+    }
+    text
 }
 
 #[uniffi::export]
 impl Session {
     #[uniffi::constructor]
     pub fn connect(config: ConnectionConfig, mode: Mode) -> Result<Arc<Self>, CoreError> {
+        let material = crate::tls::material(&config)?;
+        let files = crate::tls::files(&config)?;
         let (driver, canceller) = match config.engine {
-            Engine::Postgres => connect_postgres(&config)?,
-            Engine::MySql => connect_mysql(&config)?,
-            Engine::Mongo => connect_mongo(&config)?,
+            Engine::Postgres => connect_postgres(&config, &material)?,
+            Engine::MySql => connect_mysql(&config, &files)?,
+            Engine::Mongo => connect_mongo(&config, &files)?,
         };
         let session = Session {
             engine: config.engine,
             driver: Mutex::new(driver),
             mode: Mutex::new(mode),
             canceller,
+            _tls_files: files,
         };
         session.hold(mode)?;
         Ok(Arc::new(session))
@@ -545,7 +561,8 @@ impl Session {
     }
 
     /// An object's columns, in table order, for the query builder. MongoDB
-    /// has no schema, so there it is the fields of one document.
+    /// has no schema, so there it is every field found in a random sample of
+    /// [`COLUMN_SAMPLE`] documents, in the order they first appear.
     pub fn columns(&self, schema: String, name: String) -> Result<Vec<Column>, CoreError> {
         let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *driver {
@@ -581,27 +598,83 @@ impl Session {
                     .collect())
             }
             Driver::Mongo { runtime, database } => {
-                let first = runtime
+                let sample = runtime
                     .block_on(async {
-                        database
+                        let cursor = database
                             .collection::<Document>(&name)
-                            .find_one(Document::new())
-                            .await
+                            .aggregate([bson::doc! { "$sample": { "size": COLUMN_SAMPLE } }])
+                            .await?;
+                        cursor.try_collect::<Vec<Document>>().await
                     })
                     .map_err(query_error)?;
-                Ok(first
-                    .map(|document| {
-                        document
-                            .keys()
-                            .map(|key| Column {
-                                name: key.clone(),
-                                type_tag: String::new(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default())
+                Ok(sampled_columns(&sample))
             }
         }
+    }
+
+    /// The primary key's columns, in key order; none for a table without one,
+    /// a view, or a MongoDB view or system collection, which are not edited.
+    pub fn primary_key(&self, schema: String, name: String) -> Result<Vec<String>, CoreError> {
+        let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
+        match &mut *driver {
+            Driver::Postgres { runtime, client } => {
+                let rows = runtime
+                    .block_on(client.query(
+                        "SELECT a.attname::text FROM pg_index i \
+                         JOIN pg_class c ON c.oid = i.indrelid \
+                         JOIN pg_namespace n ON n.oid = c.relnamespace \
+                         JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY (i.indkey) \
+                         WHERE n.nspname = $1 AND c.relname = $2 AND i.indisprimary \
+                         ORDER BY array_position(i.indkey::int2[], a.attnum)",
+                        &[&schema, &name],
+                    ))
+                    .map_err(|error| query_error(postgres_error(error)))?;
+                Ok(rows.iter().map(|row| row.get(0)).collect())
+            }
+            Driver::MySql(conn) => conn
+                .exec(
+                    "SELECT COLUMN_NAME FROM information_schema.STATISTICS \
+                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' \
+                     ORDER BY SEQ_IN_INDEX",
+                    (schema, name),
+                )
+                .map_err(query_error),
+            Driver::Mongo { runtime, database } => {
+                if name.starts_with("system.") {
+                    return Ok(Vec::new());
+                }
+                let kinds = runtime
+                    .block_on(async {
+                        let cursor = database
+                            .list_collections()
+                            .filter(bson::doc! { "name": &name })
+                            .await?;
+                        cursor.try_collect::<Vec<_>>().await
+                    })
+                    .map_err(query_error)?;
+                let plain = kinds.iter().any(|spec| {
+                    spec.collection_type == mongodb::results::CollectionType::Collection
+                });
+                Ok(if plain {
+                    vec!["_id".to_owned()]
+                } else {
+                    Vec::new()
+                })
+            }
+        }
+    }
+
+    /// The statements that write edited rows back, checked by the write gate
+    /// in [`crate::edits`], each for [`Session::run_prepared`].
+    pub fn prepare_edits(
+        &self,
+        target: crate::EditTarget,
+        rows: Vec<crate::RowEdit>,
+    ) -> Result<Vec<Arc<Prepared>>, CoreError> {
+        Ok(crate::edits::prepare(self.engine, &target, &rows)?
+            .into_iter()
+            .map(Arc::new)
+            .collect())
     }
 
     /// DBDelve's own preview of an object: the one place it writes a `LIMIT`,
@@ -728,7 +801,10 @@ fn empty_result() -> ResultSet {
     }
 }
 
-fn connect_postgres(config: &ConnectionConfig) -> Result<(Driver, Canceller), CoreError> {
+fn connect_postgres(
+    config: &ConnectionConfig,
+    material: &crate::tls::Material,
+) -> Result<(Driver, Canceller), CoreError> {
     let runtime = runtime()?;
     let mut pg = tokio_postgres::Config::new();
     pg.host(&config.host)
@@ -753,7 +829,7 @@ fn connect_postgres(config: &ConnectionConfig) -> Result<(Driver, Canceller), Co
             // `Require` with a verifying connector: never `prefer`, which
             // falls back to plaintext without saying so.
             pg.ssl_mode(tokio_postgres::config::SslMode::Require);
-            let tls = MakeRustlsConnect::new(tls_config());
+            let tls = MakeRustlsConnect::new(crate::tls::client_config(material)?);
             let (client, connection) = runtime
                 .block_on(pg.connect(tls.clone()))
                 .map_err(|error| connect_error(postgres_error(error)))?;
@@ -929,7 +1005,10 @@ async fn run_postgres(
     Ok(result)
 }
 
-fn connect_mysql(config: &ConnectionConfig) -> Result<(Driver, Canceller), CoreError> {
+fn connect_mysql(
+    config: &ConnectionConfig,
+    files: &crate::tls::Files,
+) -> Result<(Driver, Canceller), CoreError> {
     let builder = mysql::OptsBuilder::new()
         .ip_or_hostname(Some(config.host.clone()))
         .tcp_port(config.port)
@@ -939,7 +1018,17 @@ fn connect_mysql(config: &ConnectionConfig) -> Result<(Driver, Canceller), CoreE
         .tcp_connect_timeout(Some(CONNECT_TIMEOUT))
         .ssl_opts(match config.ssl_mode {
             SslMode::Disable => None,
-            SslMode::VerifyFull => Some(mysql::SslOpts::default()),
+            SslMode::VerifyFull => Some(
+                mysql::SslOpts::default()
+                    .with_root_cert_path(files.ca.clone())
+                    .with_client_identity(
+                        files
+                            .cert
+                            .clone()
+                            .zip(files.key.clone())
+                            .map(|(cert, key)| mysql::ClientIdentity::new(cert, key)),
+                    ),
+            ),
         });
     let opts = mysql::Opts::from(builder);
     let conn =
@@ -1015,7 +1104,10 @@ fn mysql_text(value: mysql::Value) -> Option<String> {
     }
 }
 
-fn connect_mongo(config: &ConnectionConfig) -> Result<(Driver, Canceller), CoreError> {
+fn connect_mongo(
+    config: &ConnectionConfig,
+    files: &crate::tls::Files,
+) -> Result<(Driver, Canceller), CoreError> {
     use mongodb::options::{ClientOptions, Credential, ServerAddress, Tls, TlsOptions};
     if config.database.is_empty() {
         return Err(connect_error("Name the database to open."));
@@ -1036,19 +1128,27 @@ fn connect_mongo(config: &ConnectionConfig) -> Result<(Driver, Canceller), CoreE
         .credential(credential)
         .tls(match config.ssl_mode {
             SslMode::Disable => Tls::Disabled,
-            SslMode::VerifyFull => Tls::Enabled(TlsOptions::default()),
+            SslMode::VerifyFull => Tls::Enabled(
+                TlsOptions::builder()
+                    .ca_file_path(files.ca.clone())
+                    .cert_key_file_path(files.cert_key.clone())
+                    .build(),
+            ),
         })
         .app_name("DBDelve Android".to_owned())
         .connect_timeout(CONNECT_TIMEOUT)
         .server_selection_timeout(CONNECT_TIMEOUT)
         .build();
     let database = runtime.block_on(async {
-        let client = mongodb::Client::with_options(options).map_err(connect_error)?;
+        let failed = |error: mongodb::error::Error| {
+            connect_error(crate::tls::explained(&with_causes(&error)))
+        };
+        let client = mongodb::Client::with_options(options).map_err(failed)?;
         let database = client.database(&config.database);
         database
             .run_command(bson::doc! { "ping": 1 })
             .await
-            .map_err(connect_error)?;
+            .map_err(failed)?;
         Ok::<_, CoreError>(database)
     })?;
     Ok((Driver::Mongo { runtime, database }, Canceller::Mongo))
@@ -1063,6 +1163,9 @@ async fn run_mongo(
     let Some(collection) = command.collection else {
         return run_mongo_users(database, command.call, limit).await;
     };
+    if let Some(verbosity) = command.explain {
+        return explain_mongo(database, &collection, command.call, verbosity).await;
+    }
     let collection = database.collection::<Document>(&collection);
     let one = |name: &str, value: u64| ResultSet {
         columns: vec![Column {
@@ -1147,6 +1250,163 @@ async fn run_mongo(
     }
 }
 
+/// The server's `explain` of a find, an aggregate or a count, as one row per
+/// stage of the plan: what it is, the index it uses, and with
+/// `executionStats` what it read and returned and how long it took, and the
+/// filter or index bounds it applies.
+async fn explain_mongo(
+    database: &mongodb::Database,
+    collection: &str,
+    call: Call,
+    verbosity: mongo_cmd::Verbosity,
+) -> Result<ResultSet, CoreError> {
+    let explained = match call {
+        Call::Find { filter, projection } => {
+            let mut find = bson::doc! { "find": collection, "filter": filter };
+            if let Some(projection) = projection {
+                find.insert("projection", projection);
+            }
+            find
+        }
+        Call::Aggregate { pipeline } => {
+            bson::doc! { "aggregate": collection, "pipeline": pipeline, "cursor": {} }
+        }
+        Call::Count { filter } => bson::doc! { "count": collection, "query": filter },
+        _ => {
+            return Err(query_error(
+                "Only find, aggregate and countDocuments can be explained here.",
+            ));
+        }
+    };
+    let reply = database
+        .run_command(bson::doc! { "explain": explained, "verbosity": verbosity.name() })
+        .await
+        .map_err(query_error)?;
+    Ok(plan_rows(&reply))
+}
+
+/// One row per stage, outermost first, its depth shown by indenting.
+fn plan_rows(reply: &Document) -> ResultSet {
+    let names = [
+        "stage",
+        "index",
+        "returned",
+        "docs examined",
+        "keys examined",
+        "ms",
+        "detail",
+    ];
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    let number = |stage: &Document, key: &str| -> Option<String> {
+        match stage.get(key)? {
+            Bson::Int32(n) => Some(n.to_string()),
+            Bson::Int64(n) => Some(n.to_string()),
+            Bson::Double(n) => Some(n.to_string()),
+            _ => None,
+        }
+    };
+    fn walk(
+        stage: &Document,
+        depth: usize,
+        rows: &mut Vec<Vec<Option<String>>>,
+        number: &dyn Fn(&Document, &str) -> Option<String>,
+    ) {
+        // An SBE plan wraps the classic one in `queryPlan`.
+        if let Ok(inner) = stage.get_document("queryPlan") {
+            return walk(inner, depth, rows, number);
+        }
+        if let Ok(name) = stage.get_str("stage") {
+            rows.push(vec![
+                Some(format!("{}{name}", "  ".repeat(depth))),
+                stage.get_str("indexName").ok().map(str::to_owned),
+                number(stage, "nReturned"),
+                number(stage, "docsExamined"),
+                number(stage, "keysExamined"),
+                number(stage, "executionTimeMillisEstimate"),
+                ["indexBounds", "filter"]
+                    .iter()
+                    .find_map(|key| stage.get_document(key).ok())
+                    .map(|detail| {
+                        Bson::Document(detail.clone())
+                            .into_relaxed_extjson()
+                            .to_string()
+                    }),
+            ]);
+        }
+        for key in ["inputStage", "outerStage", "innerStage"] {
+            if let Ok(child) = stage.get_document(key) {
+                walk(child, depth + 1, rows, number);
+            }
+        }
+        if let Ok(children) = stage.get_array("inputStages") {
+            for child in children.iter().filter_map(Bson::as_document) {
+                walk(child, depth + 1, rows, number);
+            }
+        }
+    }
+    // The plan run, with its numbers, when there is one; else the plan chosen.
+    let plan_of = |explain: &Document, rows: &mut Vec<Vec<Option<String>>>| {
+        if let Ok(stats) = explain.get_document("executionStats") {
+            rows.push(vec![
+                Some("total".to_owned()),
+                None,
+                number(stats, "nReturned"),
+                number(stats, "totalDocsExamined"),
+                number(stats, "totalKeysExamined"),
+                number(stats, "executionTimeMillis"),
+                None,
+            ]);
+            if let Ok(stages) = stats.get_document("executionStages") {
+                walk(stages, 1, rows, &number);
+                return;
+            }
+        }
+        if let Ok(plan) = explain
+            .get_document("queryPlanner")
+            .and_then(|planner| planner.get_document("winningPlan"))
+        {
+            walk(plan, 1, rows, &number);
+        }
+    };
+    match reply.get_array("stages") {
+        // An aggregate the server did not push down whole: its pipeline, the
+        // first stage holding the query's own plan.
+        Ok(stages) => {
+            for stage in stages.iter().filter_map(Bson::as_document) {
+                let Some((name, body)) = stage.iter().next() else {
+                    continue;
+                };
+                rows.push(vec![
+                    Some(name.clone()),
+                    None,
+                    number(stage, "nReturned"),
+                    None,
+                    None,
+                    number(stage, "executionTimeMillisEstimate"),
+                    None,
+                ]);
+                if let (Some(explain), "$cursor") = (body.as_document(), name.as_str()) {
+                    plan_of(explain, &mut rows);
+                }
+            }
+        }
+        Err(_) => plan_of(reply, &mut rows),
+    }
+    ResultSet {
+        columns: names
+            .iter()
+            .map(|name| Column {
+                name: (*name).to_owned(),
+                type_tag: String::new(),
+            })
+            .collect(),
+        rows,
+        capped: false,
+        affected: None,
+        elapsed_ms: 0,
+    }
+}
+
 /// The database's own user methods, as the commands the shell sends.
 async fn run_mongo_users(
     database: &mongodb::Database,
@@ -1211,25 +1471,7 @@ async fn documents(
 }
 
 fn rows_of(read: Vec<Document>, capped: bool) -> ResultSet {
-    let mut columns: Vec<Column> = Vec::new();
-    for document in &read {
-        for (key, value) in document {
-            match columns.iter_mut().find(|column| &column.name == key) {
-                Some(column) if column.type_tag.is_empty() && *value != Bson::Null => {
-                    column.type_tag = bson_type(value);
-                }
-                Some(_) => {}
-                None => columns.push(Column {
-                    name: key.clone(),
-                    type_tag: if *value == Bson::Null {
-                        String::new()
-                    } else {
-                        bson_type(value)
-                    },
-                }),
-            }
-        }
-    }
+    let columns = sampled_columns(&read);
     let rows = read
         .iter()
         .map(|document| {
@@ -1250,6 +1492,30 @@ fn rows_of(read: Vec<Document>, capped: bool) -> ResultSet {
         affected: None,
         elapsed_ms: 0,
     }
+}
+
+/// Each top-level field the documents hold, as result columns or the
+/// builder's, in the order fields first
+/// appear, typed by the first value that is not null.
+fn sampled_columns(documents: &[Document]) -> Vec<Column> {
+    let mut columns: Vec<Column> = Vec::new();
+    for document in documents {
+        for (key, value) in document {
+            let tag = match value {
+                Bson::Null => String::new(),
+                value => bson_type(value),
+            };
+            match columns.iter_mut().find(|column| &column.name == key) {
+                Some(column) if column.type_tag.is_empty() => column.type_tag = tag,
+                Some(_) => {}
+                None => columns.push(Column {
+                    name: key.clone(),
+                    type_tag: tag,
+                }),
+            }
+        }
+    }
+    columns
 }
 
 fn bson_type(value: &Bson) -> String {

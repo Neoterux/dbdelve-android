@@ -23,6 +23,10 @@ fn config(engine: Engine, variable: &str, ssl_mode: SslMode) -> Option<Connectio
         password: password.into(),
         database: database.into(),
         ssl_mode,
+        ca_pem: None,
+        client_cert_pem: None,
+        client_key_pem: None,
+        tls_dir: String::new(),
     })
 }
 
@@ -589,4 +593,728 @@ fn live_mysql_stops_at_the_limit() {
     );
     let after = done(run(&session, "SELECT 1"));
     assert_eq!(after.rows, vec![vec![Some("1".into())]]);
+}
+
+/// TLS past the public roots. `DBDELVE_ANDROID_TLS_CERTS` names a directory
+/// holding `ca.pem` (a private CA), `client.pem` and `client.key` (a client
+/// certificate it signed, for the user `tlsuser`). Each server variable is
+/// `host:port:user:password:database`, and its server presents a
+/// certificate that CA signed for the host, except `…_SELF_SIGNED`, whose
+/// server presents `self.pem`, a self-signed certificate, from that directory.
+fn tls_case(engine: Engine, variable: &str) -> Option<(ConnectionConfig, std::path::PathBuf)> {
+    // A directory per server: the tests run at once, and each counts its own.
+    let certs = std::path::PathBuf::from(std::env::var("DBDELVE_ANDROID_TLS_CERTS").ok()?);
+    let mut config = config(engine, variable, SslMode::VerifyFull)?;
+    config.tls_dir = std::env::temp_dir()
+        .join(format!("dbdelve-tls-{}-{variable}", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    Some((config, certs))
+}
+
+fn read(path: &std::path::Path) -> Option<String> {
+    Some(std::fs::read_to_string(path).unwrap())
+}
+
+fn connects(config: &ConnectionConfig) -> Result<Arc<Session>, CoreError> {
+    Session::connect(config.clone(), Mode::ReadOnly)
+}
+
+/// Public roots alone refuse the private CA's certificate; with the CA it
+/// connects, and the files written for the driver are gone once it closes.
+fn trusts_only_with_the_ca(config: ConnectionConfig, ca: &std::path::Path) {
+    let refused = connects(&config)
+        .err()
+        .expect("the private CA is not a public root");
+    assert!(matches!(refused, CoreError::Connect { .. }), "{refused:?}");
+    let with_ca = ConnectionConfig {
+        ca_pem: read(ca),
+        ..config.clone()
+    };
+    let session = connects(&with_ca).unwrap();
+    done(run(
+        &session,
+        if config.engine == Engine::Mongo {
+            "db.t.find({})"
+        } else {
+            "SELECT 1"
+        },
+    ));
+    drop(session);
+    let left = std::fs::read_dir(&config.tls_dir)
+        .map(|dir| dir.count())
+        .unwrap_or(0);
+    assert_eq!(left, 0, "TLS files outlived their session");
+}
+
+/// A user the server lets in only by certificate: refused without one, in
+/// with the CA's client certificate.
+fn client_certificate(config: ConnectionConfig, certs: &std::path::Path) {
+    let with_ca = ConnectionConfig {
+        user: "tlsuser".into(),
+        password: String::new(),
+        ca_pem: read(&certs.join("ca.pem")),
+        ..config
+    };
+    assert!(connects(&with_ca).is_err(), "no client certificate");
+    let with_cert = ConnectionConfig {
+        client_cert_pem: read(&certs.join("client.pem")),
+        client_key_pem: read(&certs.join("client.key")),
+        ..with_ca
+    };
+    let session = connects(&with_cert).unwrap();
+    done(run(&session, "SELECT current_user"));
+}
+
+#[test]
+#[ignore]
+fn live_postgres_tls_private_ca() {
+    let Some((config, certs)) = tls_case(Engine::Postgres, "DBDELVE_ANDROID_POSTGRES_TLS") else {
+        return;
+    };
+    trusts_only_with_the_ca(config.clone(), &certs.join("ca.pem"));
+    client_certificate(config, &certs);
+}
+
+#[test]
+#[ignore]
+fn live_postgres_tls_self_signed() {
+    let Some((config, certs)) = tls_case(Engine::Postgres, "DBDELVE_ANDROID_POSTGRES_SELF_SIGNED")
+    else {
+        return;
+    };
+    trusts_only_with_the_ca(config, &certs.join("self.pem"));
+}
+
+#[test]
+#[ignore]
+fn live_mysql_tls_private_ca() {
+    let Some((config, certs)) = tls_case(Engine::MySql, "DBDELVE_ANDROID_MYSQL_TLS") else {
+        return;
+    };
+    trusts_only_with_the_ca(config.clone(), &certs.join("ca.pem"));
+    client_certificate(config, &certs);
+}
+
+#[test]
+#[ignore]
+fn live_mongo_tls_private_ca() {
+    let Some((config, certs)) = tls_case(Engine::Mongo, "DBDELVE_ANDROID_MONGO_TLS") else {
+        return;
+    };
+    trusts_only_with_the_ca(config, &certs.join("ca.pem"));
+}
+
+/// Runs a statement in Full, whatever it is: test setup, not the gate's test.
+fn setup(session: &Session, text: &str) {
+    let outcome = session
+        .run(
+            text.into(),
+            1000,
+            vec![
+                Destructive::Drop,
+                Destructive::UnfilteredDelete,
+                Destructive::Truncate,
+            ],
+            true,
+            Some(Mode::Full),
+        )
+        .unwrap();
+    assert!(
+        matches!(outcome, RunOutcome::Done { .. }),
+        "{text}: {outcome:?}"
+    );
+}
+
+/// The builder's statement, filled with `values` (a text, or a number when it
+/// reads as one) in parameter order, and run.
+fn built(
+    session: &Session,
+    spec: &dbdelve_core::QuerySpec,
+    values: &[&str],
+) -> dbdelve_core::ResultSet {
+    use dbdelve_core::{Binding, ParamValue};
+    let engine = session.engine();
+    let query = dbdelve_core::build_query(engine, spec.clone());
+    let names: Vec<String> = query.parameters.iter().flatten().cloned().collect();
+    assert_eq!(names.len(), values.len(), "{}", query.text);
+    let bindings = names
+        .into_iter()
+        .zip(values)
+        .map(|(name, value)| Binding {
+            name,
+            value: if value.parse::<f64>().is_ok() {
+                ParamValue::Number {
+                    value: (*value).into(),
+                }
+            } else {
+                ParamValue::Text {
+                    value: (*value).into(),
+                }
+            },
+        })
+        .collect();
+    let filled = dbdelve_core::fill_parameters(engine, query.text, bindings).unwrap();
+    match session
+        .run(filled.clone(), 1000, Vec::new(), false, None)
+        .unwrap()
+    {
+        RunOutcome::Done { result } => result,
+        stopped => panic!("{filled}: {stopped:?}"),
+    }
+}
+
+/// IN, BETWEEN, a case-insensitive match and OR groups, a count, and a count
+/// per group, run on the server; and on MongoDB, a field only one document
+/// in a hundred holds still shows among the builder's columns.
+fn builder_runs(session: &Session, schema: &str, table: &str, starts_with_an: &str) {
+    use dbdelve_core::{Filter, FilterOp, QuerySpec};
+    let filter = |column: &str, op, values| Filter {
+        column: column.into(),
+        op,
+        values,
+    };
+    let base = QuerySpec {
+        schema: schema.into(),
+        table: table.into(),
+        columns: vec!["id".into()],
+        groups: Vec::new(),
+        count: false,
+        group_by: Vec::new(),
+        order_by: Some("id".into()),
+        descending: false,
+        limit: None,
+    };
+    let either = QuerySpec {
+        groups: vec![
+            vec![
+                filter("status", FilterOp::In, 2),
+                filter("total", FilterOp::Between, 0),
+            ],
+            vec![filter("name", FilterOp::LikeIgnoringCase, 0)],
+        ],
+        ..base.clone()
+    };
+    let ids: Vec<String> = built(
+        session,
+        &either,
+        &["paid", "shipped", "15", "45", starts_with_an],
+    )
+    .rows
+    .into_iter()
+    .map(|row| row[0].clone().unwrap())
+    .collect();
+    assert_eq!(ids, ["1", "2", "3", "4"]);
+
+    let per_status = QuerySpec {
+        count: true,
+        group_by: vec!["status".into()],
+        order_by: Some("status".into()),
+        ..base.clone()
+    };
+    let result = built(session, &per_status, &[]);
+    let names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["status", "count"]);
+    let rows: Vec<(String, String)> = result
+        .rows
+        .into_iter()
+        .map(|row| (row[0].clone().unwrap(), row[1].clone().unwrap()))
+        .collect();
+    let expected = [("open", "2"), ("paid", "2"), ("shipped", "1")];
+    assert_eq!(rows, expected.map(|(a, b)| (a.to_owned(), b.to_owned())));
+
+    let all = QuerySpec {
+        count: true,
+        order_by: None,
+        ..base
+    };
+    assert_eq!(built(session, &all, &[]).rows, [[Some("5".to_owned())]]);
+}
+
+#[test]
+#[ignore]
+fn live_builder_postgres() {
+    let Some(config) = config(
+        Engine::Postgres,
+        "DBDELVE_ANDROID_POSTGRES",
+        SslMode::Disable,
+    ) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_built");
+    setup(
+        &session,
+        "CREATE TABLE android_built (id int PRIMARY KEY, status text, total numeric, name text)",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_built VALUES (1, 'paid', 10, 'Ana'), (2, 'open', 20, 'ana'), \
+         (3, 'paid', 30, 'Bob'), (4, 'shipped', 40, 'Cy'), (5, 'open', 50, 'Dee')",
+    );
+    builder_runs(&session, "public", "android_built", "an%");
+    setup(&session, "DROP TABLE android_built");
+}
+
+#[test]
+#[ignore]
+fn live_builder_mysql() {
+    let Some(config) = config(Engine::MySql, "DBDELVE_ANDROID_MYSQL", SslMode::Disable) else {
+        return;
+    };
+    let database = config.database.clone();
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_built");
+    // A binary collation, which does not ignore case by itself.
+    setup(
+        &session,
+        "CREATE TABLE android_built (id int PRIMARY KEY, status varchar(20), total decimal(10,2), \
+         name varchar(20) CHARACTER SET utf8 COLLATE utf8_bin)",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_built VALUES (1, 'paid', 10, 'Ana'), (2, 'open', 20, 'ana'), \
+         (3, 'paid', 30, 'Bob'), (4, 'shipped', 40, 'Cy'), (5, 'open', 50, 'Dee')",
+    );
+    builder_runs(&session, &database, "android_built", "an%");
+    setup(&session, "DROP TABLE android_built");
+}
+
+#[test]
+#[ignore]
+fn live_builder_mongo() {
+    let Some(config) = config(Engine::Mongo, "DBDELVE_ANDROID_MONGO", SslMode::Disable) else {
+        return;
+    };
+    let database = config.database.clone();
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "db.android_built.drop()");
+    setup(
+        &session,
+        "db.android_built.insertMany([{_id: 1, id: 1, status: 'paid', total: 10, name: 'Ana'}, \
+         {_id: 2, id: 2, status: 'open', total: 20, name: 'ana'}, {_id: 3, id: 3, status: 'paid', total: 30, name: 'Bob'}, \
+         {_id: 4, id: 4, status: 'shipped', total: 40, name: 'Cy'}, {_id: 5, id: 5, status: 'open', total: 50, name: 'Dee'}])",
+    );
+    builder_runs(&session, &database, "android_built", "^an");
+
+    // One document in a hundred has `rare`; one document never was enough.
+    setup(&session, "db.android_sampled.drop()");
+    let many: Vec<String> = (0..99).map(|n| format!("{{n: {n}}}")).collect();
+    setup(
+        &session,
+        &format!("db.android_sampled.insertMany([{}])", many.join(", ")),
+    );
+    setup(
+        &session,
+        "db.android_sampled.insertOne({n: 99, rare: true})",
+    );
+    let columns: Vec<String> = session
+        .columns(database, "android_sampled".into())
+        .unwrap()
+        .into_iter()
+        .map(|column| column.name)
+        .collect();
+    assert_eq!(columns, ["_id", "n", "rare"]);
+    setup(&session, "db.android_sampled.drop()");
+    setup(&session, "db.android_built.drop()");
+}
+
+fn explained(session: &Session, statement: &str, analyze: bool) -> RunOutcome {
+    let text =
+        dbdelve_core::explain_statement(session.engine(), statement.into(), analyze).unwrap();
+    session.run(text, 1000, Vec::new(), false, None).unwrap()
+}
+
+/// A plan, and with analyze a plan run, in Read-only; analyzing a write is
+/// the write, so it stops at the gate; the text explained is untouched.
+fn explains_sql(session: &Session, table: &str) {
+    let plan = done(explained(
+        session,
+        &format!("SELECT * FROM {table} WHERE id = 2"),
+        false,
+    ));
+    assert!(!plan.rows.is_empty());
+    assert!(matches!(
+        explained(session, &format!("DELETE FROM {table}"), true),
+        RunOutcome::Stopped { .. }
+    ));
+    // EXPLAIN alone runs nothing, so the gate lets it through in Read-only.
+    // MySQL's own read-only hold still refuses to plan a write: the backstop
+    // is stricter than the gate there, never looser.
+    let text = dbdelve_core::explain_statement(
+        session.engine(),
+        format!("DELETE FROM {table} WHERE id = 1"),
+        false,
+    )
+    .unwrap();
+    match session.run(text, 1000, Vec::new(), false, None) {
+        Ok(RunOutcome::Done { .. }) => assert_eq!(session.engine(), Engine::Postgres),
+        Err(CoreError::Query { reason }) => {
+            assert_eq!(session.engine(), Engine::MySql);
+            assert!(reason.contains("READ ONLY"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+#[ignore]
+fn live_explain_postgres() {
+    let Some(config) = config(
+        Engine::Postgres,
+        "DBDELVE_ANDROID_POSTGRES",
+        SslMode::Disable,
+    ) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_explain");
+    setup(
+        &session,
+        "CREATE TABLE android_explain (id int PRIMARY KEY, label text)",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_explain SELECT n, 'x' FROM generate_series(1, 50) n",
+    );
+    explains_sql(&session, "android_explain");
+    let analyzed = done(explained(
+        &session,
+        "SELECT count(*) FROM android_explain",
+        true,
+    ));
+    let text: Vec<String> = analyzed
+        .rows
+        .iter()
+        .map(|row| row[0].clone().unwrap())
+        .collect();
+    assert!(
+        text.iter().any(|line| line.contains("actual time")),
+        "{text:?}"
+    );
+    setup(&session, "DROP TABLE android_explain");
+}
+
+#[test]
+#[ignore]
+fn live_explain_mysql() {
+    let Some(config) = config(Engine::MySql, "DBDELVE_ANDROID_MYSQL", SslMode::Disable) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_explain");
+    setup(
+        &session,
+        "CREATE TABLE android_explain (id int PRIMARY KEY, label text)",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_explain VALUES (1, 'a'), (2, 'b')",
+    );
+    explains_sql(&session, "android_explain");
+    setup(&session, "DROP TABLE android_explain");
+}
+
+#[test]
+#[ignore]
+fn live_explain_mongo() {
+    let Some(config) = config(Engine::Mongo, "DBDELVE_ANDROID_MONGO", SslMode::Disable) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "db.android_explain.drop()");
+    let many: Vec<String> = (0..60)
+        .map(|n| format!("{{n: {n}, kind: 'k{}'}}", n % 3))
+        .collect();
+    setup(
+        &session,
+        &format!("db.android_explain.insertMany([{}])", many.join(", ")),
+    );
+
+    let stages = |result: &dbdelve_core::ResultSet| -> Vec<String> {
+        for row in &result.rows {
+            assert_eq!(row.len(), result.columns.len(), "{row:?}");
+        }
+        result
+            .rows
+            .iter()
+            .map(|row| row[0].clone().unwrap().trim().to_owned())
+            .collect()
+    };
+    let scan = done(explained(
+        &session,
+        "db.android_explain.find({n: {$gt: 40}})",
+        false,
+    ));
+    assert!(
+        stages(&scan).contains(&"COLLSCAN".to_owned()),
+        "{:?}",
+        scan.rows
+    );
+
+    let run = done(explained(
+        &session,
+        "db.android_explain.find({n: {$gt: 40}})",
+        true,
+    ));
+    let total = &run.rows[0];
+    assert_eq!(total[0].as_deref(), Some("total"));
+    assert_eq!(total[2].as_deref(), Some("19"), "returned");
+    assert_eq!(total[3].as_deref(), Some("60"), "docs examined");
+
+    for statement in [
+        "db.android_explain.aggregate([{$match: {n: {$lt: 10}}}, {$group: {_id: '$kind', c: {$sum: 1}}}])",
+        "db.android_explain.countDocuments({kind: 'k1'})",
+    ] {
+        for analyze in [false, true] {
+            let plan = done(explained(&session, statement, analyze));
+            assert!(!stages(&plan).is_empty(), "{statement}: {:?}", plan.rows);
+        }
+    }
+    assert!(
+        dbdelve_core::explain_statement(
+            Engine::Mongo,
+            "db.android_explain.deleteMany({})".into(),
+            true
+        )
+        .is_err(),
+        "a write is not explained"
+    );
+    setup(&session, "db.android_explain.drop()");
+}
+
+/// A row edit: the key read from the server, the statement refused in
+/// Read-only, run once in Read-write, and the values it wrote read back.
+fn edits_rows(
+    session: &Session,
+    schema: &str,
+    table: &str,
+    rows: Vec<dbdelve_core::RowEdit>,
+    check: &str,
+    expected: &[&[Option<&str>]],
+) {
+    use dbdelve_core::EditTarget;
+    let key = session.primary_key(schema.into(), table.into()).unwrap();
+    let target = EditTarget {
+        schema: schema.into(),
+        table: table.into(),
+        key,
+    };
+    let prepared = session.prepare_edits(target, rows).unwrap();
+    for statement in &prepared {
+        let stopped = session
+            .run_prepared(statement.clone(), Vec::new(), None)
+            .unwrap();
+        assert!(
+            matches!(
+                stopped,
+                RunOutcome::Stopped {
+                    stop: Stop::Upgrade {
+                        mode: Mode::ReadWrite
+                    },
+                    ..
+                }
+            ),
+            "Read-only must stop an edit: {stopped:?}"
+        );
+        let done = session
+            .run_prepared(statement.clone(), Vec::new(), Some(Mode::ReadWrite))
+            .unwrap();
+        assert!(matches!(done, RunOutcome::Done { .. }), "{done:?}");
+    }
+    assert_eq!(session.mode(), Mode::ReadOnly, "run once leaves the mode");
+    let result = done(
+        session
+            .run(check.into(), 100, Vec::new(), false, None)
+            .unwrap(),
+    );
+    let got: Vec<Vec<Option<&str>>> = result
+        .rows
+        .iter()
+        .map(|row| row.iter().map(|cell| cell.as_deref()).collect())
+        .collect();
+    assert_eq!(got, expected);
+}
+
+fn edit(key: &[(&str, &str, &str)], changes: &[(&str, Option<&str>)]) -> dbdelve_core::RowEdit {
+    use dbdelve_core::{CellEdit, KeyValue, NewValue, RowEdit};
+    RowEdit {
+        key: key
+            .iter()
+            .map(|(column, value, type_tag)| KeyValue {
+                column: (*column).into(),
+                value: (*value).into(),
+                type_tag: (*type_tag).into(),
+            })
+            .collect(),
+        changes: changes
+            .iter()
+            .map(|(column, value)| CellEdit {
+                column: (*column).into(),
+                value: match value {
+                    Some(value) => NewValue::Text {
+                        value: (*value).into(),
+                    },
+                    None => NewValue::Null,
+                },
+            })
+            .collect(),
+    }
+}
+
+#[test]
+#[ignore]
+fn live_edit_postgres() {
+    let Some(config) = config(
+        Engine::Postgres,
+        "DBDELVE_ANDROID_POSTGRES",
+        SslMode::Disable,
+    ) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_edit");
+    setup(&session, "DROP VIEW IF EXISTS android_edit_view");
+    setup(
+        &session,
+        "CREATE TABLE android_edit (line int, id int, qty int, note text, PRIMARY KEY (id, line))",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_edit VALUES (1, 1, 5, 'a'), (2, 1, 6, 'b'), (1, 2, 7, 'c')",
+    );
+    setup(
+        &session,
+        "CREATE VIEW android_edit_view AS SELECT * FROM android_edit",
+    );
+    assert_eq!(
+        session
+            .primary_key("public".into(), "android_edit".into())
+            .unwrap(),
+        ["id", "line"],
+        "key order, not column order"
+    );
+    assert!(
+        session
+            .primary_key("public".into(), "android_edit_view".into())
+            .unwrap()
+            .is_empty()
+    );
+    edits_rows(
+        &session,
+        "public",
+        "android_edit",
+        vec![
+            edit(
+                &[("id", "1", ""), ("line", "2", "")],
+                &[("qty", Some("60")), ("note", Some("it's"))],
+            ),
+            edit(&[("id", "2", ""), ("line", "1", "")], &[("note", None)]),
+        ],
+        "SELECT qty::text, note FROM android_edit ORDER BY id, line",
+        &[
+            &[Some("5"), Some("a")],
+            &[Some("60"), Some("it's")],
+            &[Some("7"), None],
+        ],
+    );
+    setup(&session, "DROP VIEW android_edit_view");
+    setup(&session, "DROP TABLE android_edit");
+}
+
+#[test]
+#[ignore]
+fn live_edit_mysql() {
+    let Some(config) = config(Engine::MySql, "DBDELVE_ANDROID_MYSQL", SslMode::Disable) else {
+        return;
+    };
+    let database = config.database.clone();
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_edit");
+    setup(
+        &session,
+        "CREATE TABLE android_edit (line int, id int, qty int, note text, PRIMARY KEY (id, line)) ENGINE=InnoDB",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_edit VALUES (1, 1, 5, 'a'), (2, 1, 6, 'b'), (1, 2, 7, 'c')",
+    );
+    assert_eq!(
+        session
+            .primary_key(database.clone(), "android_edit".into())
+            .unwrap(),
+        ["id", "line"]
+    );
+    edits_rows(
+        &session,
+        &database,
+        "android_edit",
+        vec![
+            edit(
+                &[("id", "1", ""), ("line", "2", "")],
+                &[("qty", Some("60")), ("note", Some("it's"))],
+            ),
+            edit(&[("id", "2", ""), ("line", "1", "")], &[("note", None)]),
+        ],
+        "SELECT qty, note FROM android_edit ORDER BY id, line",
+        &[
+            &[Some("5"), Some("a")],
+            &[Some("60"), Some("it's")],
+            &[Some("7"), None],
+        ],
+    );
+    setup(&session, "DROP TABLE android_edit");
+}
+
+#[test]
+#[ignore]
+fn live_edit_mongo() {
+    use dbdelve_core::{CellEdit, NewValue};
+    let Some(config) = config(Engine::Mongo, "DBDELVE_ANDROID_MONGO", SslMode::Disable) else {
+        return;
+    };
+    let database = config.database.clone();
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "db.android_edit.drop()");
+    setup(
+        &session,
+        "db.android_edit.insertMany([{_id: {$oid: '65a1b2c3d4e5f60718293a4b'}, n: 1, s: 'a'}, {_id: 'k2', n: 2, s: 'b'}])",
+    );
+    assert_eq!(
+        session
+            .primary_key(database.clone(), "android_edit".into())
+            .unwrap(),
+        ["_id"]
+    );
+    // The `_id` cells as the result grid holds them.
+    let read = done(
+        session
+            .run(
+                "db.android_edit.find({})".into(),
+                10,
+                Vec::new(),
+                false,
+                None,
+            )
+            .unwrap(),
+    );
+    let ids: Vec<String> = read
+        .rows
+        .iter()
+        .map(|row| row[0].clone().unwrap())
+        .collect();
+    let mut by_oid = edit(&[("_id", &ids[0], "objectid")], &[("s", Some("A"))]);
+    by_oid.changes.push(CellEdit {
+        column: "n".into(),
+        value: NewValue::Json { value: "10".into() },
+    });
+    edits_rows(
+        &session,
+        &database,
+        "android_edit",
+        vec![by_oid, edit(&[("_id", &ids[1], "string")], &[("s", None)])],
+        "db.android_edit.aggregate([{$project: {_id: 0, n: 1, s: 1}}])",
+        &[&[Some("10"), Some("A")], &[Some("2"), None]],
+    );
+    setup(&session, "db.android_edit.drop()");
 }
