@@ -9,7 +9,7 @@ to its version and date.
 
 ### Changed
 
-- Runs on Android 13 and 14 as well as Android 15.
+- Runs on Android 12, 13 and 14 as well as Android 15.
 
 ## 0.1.0 (2026-11-19)
 
