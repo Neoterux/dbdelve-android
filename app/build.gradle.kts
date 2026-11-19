@@ -79,6 +79,13 @@ val uniffiBindings by tasks.registering(Exec::class) {
     )
     inputs.dir(jniLibsDir)
     outputs.dir(bindingsDir)
+    // A library stripped of its symbols makes bindgen write nothing and exit
+    // happily, and the build then fails far away, on every type it names.
+    doLast {
+        check(bindingsDir.get().asFile.walk().any { it.extension == "kt" }) {
+            "uniffi-bindgen generated no Kotlin: is libdbdelve_core.so stripped of its symbols?"
+        }
+    }
 }
 
 tasks.named("preBuild") { dependsOn(uniffiBindings) }
