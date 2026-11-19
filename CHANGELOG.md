@@ -5,7 +5,7 @@ Every user-visible change, newest first. The app shows this file under
 reading the code. Add to *Unreleased* with each change; a release renames it
 to its version and date.
 
-## Unreleased
+## 0.4.0 (2026-11-19)
 
 ### Added
 
