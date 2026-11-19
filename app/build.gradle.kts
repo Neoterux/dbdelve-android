@@ -61,6 +61,20 @@ android {
     buildFeatures {
         compose = true
     }
+    // ScreensTest draws the real screens on the JVM against a live database,
+    // through the core built for the host (`cargo build --release --lib`).
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            all {
+                it.systemProperty("jna.library.path", rootProject.file("core/target/release").absolutePath)
+                it.systemProperty("dbdelve.screens", layout.buildDirectory.dir("screens").get().asFile.absolutePath)
+                // The bindings' cleaner is android.system.SystemCleaner, which
+                // Robolectric backs with the JDK's own, behind the module wall.
+                it.jvmArgs("--add-exports=java.base/jdk.internal.ref=ALL-UNNAMED")
+            }
+        }
+    }
     sourceSets["main"].java.srcDir(layout.buildDirectory.dir("generated/uniffi"))
     sourceSets["main"].jniLibs.srcDir(layout.buildDirectory.dir("generated/jniLibs"))
     sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/changelog"))
@@ -130,9 +144,19 @@ dependencies {
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
+    // The full icon set; R8 keeps only the icons the app draws.
+    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.fragment:fragment-ktx:1.8.5")
     implementation("net.java.dev.jna:jna:5.14.0@aar")
+
+    testImplementation(composeBom)
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
+    testImplementation("androidx.compose.ui:ui-test-junit4")
+    // The jar, for the host's own libjnidispatch; the app's aar carries Android's.
+    testImplementation("net.java.dev.jna:jna:5.14.0")
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
