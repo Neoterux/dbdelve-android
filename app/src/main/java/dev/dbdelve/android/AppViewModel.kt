@@ -11,7 +11,10 @@ import androidx.lifecycle.viewModelScope
 import dev.dbdelve.android.data.Profile
 import dev.dbdelve.android.data.ProfileStore
 import dev.dbdelve.android.data.Secrets
+import dev.dbdelve.android.data.TabStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.dbdelve_core.Account
@@ -71,6 +74,7 @@ fun Throwable.reason(): String = when (this) {
 class AppViewModel(
     private val store: ProfileStore,
     private val secrets: Secrets,
+    private val tabStore: TabStore,
     /** Called with the connection's name while a statement runs, null after. */
     private val keepAlive: (connection: String?) -> Unit,
 ) : ViewModel() {
@@ -90,6 +94,7 @@ class AppViewModel(
 
     val tabs = mutableStateListOf<QueryTab>()
     var current by mutableStateOf(0)
+        private set
     var pane by mutableStateOf(Pane.QUERY)
     var running by mutableStateOf(false)
         private set
@@ -122,6 +127,7 @@ class AppViewModel(
         profiles = profiles.filterNot { it.id == profile.id }
         store.save(profiles)
         secrets.forget(profile.id)
+        tabStore.forget(profile.id)
     }
 
     fun connect(profile: Profile) {
@@ -137,8 +143,7 @@ class AppViewModel(
                 session = opened
                 this@AppViewModel.profile = profile
                 mode = profile.mode
-                tabs.clear()
-                newTab()
+                restoreTabs(profile)
                 pane = Pane.QUERY
                 screen = Screen.Workspace
                 refreshCatalog()
@@ -147,6 +152,7 @@ class AppViewModel(
     }
 
     fun disconnect() {
+        saveTabs(now = true)
         val closing = session
         session = null
         profile = null
@@ -164,6 +170,7 @@ class AppViewModel(
         val tab = QueryTab(nextTabId++, title, text)
         tabs.add(tab)
         current = tabs.lastIndex
+        saveTabs()
         return tab
     }
 
@@ -171,6 +178,48 @@ class AppViewModel(
         tabs.remove(tab)
         if (tabs.isEmpty()) newTab()
         current = current.coerceIn(0, tabs.lastIndex)
+        saveTabs()
+    }
+
+    fun select(at: Int) {
+        current = at
+        saveTabs()
+    }
+
+    /** Every keystroke and key-row press goes through here, so none is unsaved. */
+    fun edit(tab: QueryTab, value: TextFieldValue) {
+        val changed = tab.text.text != value.text
+        tab.text = value
+        if (changed) saveTabs()
+    }
+
+    private fun restoreTabs(profile: Profile) {
+        tabs.clear()
+        nextTabId = 0
+        val (saved, at) = tabStore.load(profile.id)
+        if (saved.isEmpty()) {
+            newTab()
+            return
+        }
+        saved.forEach { tabs.add(QueryTab(nextTabId++, it.title, it.text)) }
+        current = at.coerceIn(0, tabs.lastIndex)
+    }
+
+    private var saving: Job? = null
+
+    /**
+     * Writes the tabs a moment after the last change, so typing is not a
+     * write per keystroke; [now] writes at once, for leaving the connection.
+     */
+    private fun saveTabs(now: Boolean = false) {
+        val id = profile?.id ?: return
+        val snapshot = tabs.map { TabStore.Saved(it.title, it.text.text) }
+        val at = current
+        saving?.cancel()
+        saving = viewModelScope.launch {
+            if (!now) delay(600)
+            withContext(Dispatchers.IO) { tabStore.save(id, snapshot, at) }
+        }
     }
 
     /** Runs the statement under the cursor, as typed. */

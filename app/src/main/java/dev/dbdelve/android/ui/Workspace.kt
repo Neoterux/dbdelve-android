@@ -236,7 +236,7 @@ private fun QueryPane(model: AppViewModel) {
             model.tabs.forEachIndexed { at, each ->
                 Tab(
                     selected = at == model.current,
-                    onClick = { model.current = at },
+                    onClick = { model.select(at) },
                     text = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(each.title, maxLines = 1)
@@ -256,7 +256,7 @@ private fun QueryPane(model: AppViewModel) {
 
         BasicTextField(
             value = tab.text,
-            onValueChange = { tab.text = it },
+            onValueChange = { model.edit(tab, it) },
             textStyle = TextStyle(fontFamily = Mono, fontSize = 14.sp, lineHeight = 21.sp, color = MaterialTheme.colorScheme.onSurface),
             cursorBrush = SolidColor(palette.orange),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, autoCorrectEnabled = false),
@@ -307,7 +307,7 @@ private fun QueryPane(model: AppViewModel) {
                 }
             }
         }
-        AccessoryKeys(tab)
+        AccessoryKeys(tab) { model.edit(tab, it) }
     }
 }
 
@@ -326,7 +326,7 @@ private fun RowLimit(model: AppViewModel) {
 
 /** The keys a soft keyboard buries two layers deep. */
 @Composable
-private fun AccessoryKeys(tab: QueryTab) {
+private fun AccessoryKeys(tab: QueryTab, onPress: (TextFieldValue) -> Unit) {
     val keys = listOf("⇥", "(", ")", "'", "\"", ";", "*", "=", ".", ",", "{", "}", "[", "]", ":", "$", "_", "←", "→")
     Row(
         Modifier
@@ -340,7 +340,7 @@ private fun AccessoryKeys(tab: QueryTab) {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceContainerHighest,
                 shape = RoundedCornerShape(6.dp),
-                modifier = Modifier.clickable { tab.text = press(tab.text, key) },
+                modifier = Modifier.clickable { onPress(press(tab.text, key)) },
             ) {
                 Text(
                     key,
