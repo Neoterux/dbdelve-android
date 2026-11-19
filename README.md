@@ -77,6 +77,29 @@ To install on the phone, turn on *Developer options → USB debugging* (tap
 generates the Kotlin bindings from the built library itself, so they always
 describe the core that is packaged.
 
+## Installing CI builds
+
+Every push to `main` builds a release APK; open the run under **Actions** and
+download the artifact. A tag starting with `v` (`git tag v0.1.0 && git push
+--tags`) also attaches it to a GitHub Release.
+
+**Sign with your own key, once,** or each CI build is signed with a
+throwaway key, and Android refuses to install it over the previous one
+without uninstalling first, which deletes saved connections:
+
+```sh
+keytool -genkeypair -v -keystore dbdelve-release.jks -alias dbdelve \
+  -keyalg RSA -keysize 4096 -validity 10000
+base64 -w0 dbdelve-release.jks      # macOS: base64 -i dbdelve-release.jks
+```
+
+Then add four repository secrets under *Settings → Secrets and variables →
+Actions*: `DBDELVE_SIGNING_KEYSTORE_BASE64` (that base64 output),
+`DBDELVE_SIGNING_STORE_PASSWORD`, `DBDELVE_SIGNING_KEY_ALIAS` (`dbdelve`) and
+`DBDELVE_SIGNING_KEY_PASSWORD`. Keep the `.jks` file and its passwords
+somewhere safe and out of the repository: losing them means no build can
+update the installed app again.
+
 ## Checks
 
 ```sh
@@ -204,6 +227,8 @@ Deliberate cuts, not oversights; those with a ceiling in the code are marked
   and doesn't say its type.
 - **SSH tunnels.** Desktop shells out to the system `ssh`, which Android
   doesn't have.
+- **Results across restarts.** Query tabs and their text are kept per
+  connection; results are not, and nothing runs again on its own.
 - **A session that outlives its screen.** The foreground service keeps the
   process alive, but the session belongs to the view model, so a statement
   still ends if Android destroys the activity outright.
