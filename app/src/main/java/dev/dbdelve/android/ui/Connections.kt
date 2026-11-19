@@ -1,6 +1,12 @@
 package dev.dbdelve.android.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
@@ -56,12 +62,41 @@ import uniffi.dbdelve_core.Mode
 fun ConnectionsScreen(model: AppViewModel) {
     var filter by remember { mutableStateOf("") }
     var changelog by remember { mutableStateOf(false) }
+    var menu by remember { mutableStateOf(false) }
+    var exporting by remember { mutableStateOf(false) }
+    var importing by remember { mutableStateOf<android.net.Uri?>(null) }
+    // Android's own file picker: the file may be in Downloads, a chat's
+    // attachments or a cloud drive, and the app needs no storage permission.
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> importing = uri }
     if (changelog) ChangelogSheet { changelog = false }
+    if (exporting) ExportDialog(model) { exporting = false }
+    importing?.let { uri ->
+        ImportFlow(model, uri, onDismiss = { importing = null }) { count ->
+            importing = null
+            model.connectError = "Imported $count connection${if (count == 1) "" else "s"}."
+        }
+    }
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text("DBDelve", fontWeight = FontWeight.Bold) },
-                actions = { TextButton(onClick = { changelog = true }) { Text("What's new") } },
+                actions = {
+                    Box {
+                        IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More") }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Share connections") },
+                                enabled = model.profiles.isNotEmpty(),
+                                onClick = { menu = false; exporting = true },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Import connections") },
+                                onClick = { menu = false; pick.launch(arrayOf("*/*")) },
+                            )
+                            DropdownMenuItem(text = { Text("What's new") }, onClick = { menu = false; changelog = true })
+                        }
+                    }
+                },
             )
         },
         floatingActionButton = {

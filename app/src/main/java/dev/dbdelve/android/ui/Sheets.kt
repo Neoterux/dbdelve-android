@@ -1,7 +1,6 @@
 package dev.dbdelve.android.ui
 
 import android.content.Context
-import android.content.Intent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -44,10 +43,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.FileProvider
 import dev.dbdelve.android.AppViewModel
 import dev.dbdelve.android.data.SavedQuery
-import java.io.File
 import uniffi.dbdelve_core.Binding
 import uniffi.dbdelve_core.ParamValue
 import uniffi.dbdelve_core.ResultSet
@@ -314,13 +311,6 @@ fun ChangelogSheet(onDismiss: () -> Unit) {
  * clipboard's.
  */
 fun shareCsv(context: Context, name: String, csv: String) {
-    val directory = File(context.cacheDir, "exports").apply { mkdirs() }
     val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "results" }.take(60)
-    val file = File(directory, "$safe.csv").apply { writeText(csv) }
-    val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", file)
-    val send = Intent(Intent.ACTION_SEND)
-        .setType("text/csv")
-        .putExtra(Intent.EXTRA_STREAM, uri)
-        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    context.startActivity(Intent.createChooser(send, "Share $safe.csv").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    shareFile(context, "$safe.csv", csv.toByteArray(), "text/csv")
 }

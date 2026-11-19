@@ -7,6 +7,7 @@
 
 uniffi::setup_scaffolding!();
 
+pub mod bundle;
 pub mod gate;
 pub mod mongo_cmd;
 pub mod params;
@@ -104,4 +105,23 @@ pub fn fill_parameters(
     bindings: Vec<Binding>,
 ) -> Result<String, CoreError> {
     params::fill(engine, &text, &bindings)
+}
+
+/// Seals the app's connections JSON into a file to share, under a passphrase.
+#[uniffi::export]
+pub fn seal_connections(json: String, passphrase: String) -> Result<Vec<u8>, CoreError> {
+    bundle::seal(&json, &passphrase)
+}
+
+/// Opens a file made by [`seal_connections`]; fails on a wrong passphrase or
+/// any changed byte.
+#[uniffi::export]
+pub fn open_connections(file: Vec<u8>, passphrase: String) -> Result<String, CoreError> {
+    bundle::open(&file, &passphrase)
+}
+
+/// The shortest passphrase a connections file accepts.
+#[uniffi::export]
+pub fn shortest_passphrase() -> u32 {
+    bundle::SHORTEST_PASSPHRASE as u32
 }

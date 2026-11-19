@@ -31,6 +31,13 @@ The first public build.
 - Swipe between Query, Results, Schema and Users; pull down to refresh;
   actions in sheets within reach of a thumb.
 - A read past the row limit is stopped, not downloaded in full.
+- Share connections as an encrypted `.dbdelve` file (AES-256-GCM under a
+  passphrase), with or without their passwords, through any app.
+- Import such a file: after the passphrase, review every connection and change
+  its name, host, port, user, database, project, TLS and mode, choose whether
+  to keep its password, and decide per connection whether a name already here
+  is kept beside it, replaced or skipped. Imported connections start
+  Read-only.
 
 ### Security
 
