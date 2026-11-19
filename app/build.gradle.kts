@@ -16,8 +16,8 @@ android {
         // to this: the core is linked against that release's libc.
         minSdk = 31
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
         ndk {
             // 64-bit ARM only. No x86_64, so no emulator: test on a phone.
             abiFilters += listOf("arm64-v8a")
