@@ -5,13 +5,10 @@ Every user-visible change, newest first. The app shows this file under
 reading the code. Add to *Unreleased* with each change; a release renames it
 to its version and date.
 
-## 0.3.0 (2026-11-19)
+## Unreleased
 
 ### Added
 
-- Tells you when a newer version is out on the Releases page, with a link to
-  download it. It checks at most twice a day; **Check for updates** in the
-  menu asks right away, and **Check automatically** turns the checks off.
 - A query builder beside the SQL editor: choose a table, tap the columns,
   add filters (=, ≠, <, ≤, >, ≥, like, is null, not null), a sort and a
   limit, and see the exact statement before it runs. Run it, open it as SQL
@@ -29,6 +26,16 @@ to its version and date.
   object, and every action sheet. The bottom bar's Results shows the row
   count, a dot while a statement runs, and ! after an error.
 - Cancel is now Stop.
+- Each connection shows its engine's logo (PostgreSQL, MySQL, MongoDB), in
+  the list and beside its name once connected.
+
+## 0.3.0 (2026-11-19)
+
+### Added
+
+- Tells you when a newer version is out on the Releases page, with a link to
+  download it. It checks at most twice a day; **Check for updates** in the
+  menu asks right away, and **Check automatically** turns the checks off.
 
 ## 0.2.0 (2026-11-19)
 
