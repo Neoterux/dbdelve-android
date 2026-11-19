@@ -135,10 +135,19 @@ jobs:
       - name: Check the signature
         if: github.event_name != 'pull_request'
         run: |
-          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
-          certs="$("$apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk)"
-          echo "$certs" | grep 'Signer #1 certificate DN'
-          if echo "$certs" | grep -q 'CN=Android Debug'; then
+          set -x
+          # The build tools of compileSdk 35 when installed, else the newest.
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          [ -x "$tools/apksigner" ] || tools="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)"
+          certs="$("$tools/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk 2>&1)"
+          echo "$certs"
+          # Each signer's line reads "Signer #1 certificate DN:" or, where the
+          # key was rotated, "Signer (minSdkVersion=…) certificate DN:".
+          if ! echo "$certs" | grep -q 'certificate DN:'; then
+            echo "::error::apksigner names no signer for the release APK."
+            exit 1
+          fi
+          if echo "$certs" | grep 'certificate DN:' | grep -q 'CN=Android Debug'; then
             echo "::error::The release APK is signed with a debug key."
             exit 1
           fi
