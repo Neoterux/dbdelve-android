@@ -37,6 +37,7 @@ class MainActivity : FragmentActivity() {
                     SavedQueryStore(filesDir),
                     UpdateStore(applicationContext),
                     packageManager.getPackageInfo(packageName, 0).versionName ?: "0",
+                    File(noBackupFilesDir, "tls"),
                 ) { connection ->
                     QueryService.keepAlive(applicationContext, connection)
                 }

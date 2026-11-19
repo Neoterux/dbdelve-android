@@ -178,6 +178,14 @@ DBDELVE_ANDROID_MONGO=127.0.0.1:57007:::dev \
 cargo test -- --include-ignored
 ```
 
+TLS beyond the public roots has its own servers, skipped unless set:
+`DBDELVE_ANDROID_TLS_CERTS` names a directory holding `ca.pem`, `client.pem`
+and `client.key` (signed by that CA for the user `tlsuser`) and `self.pem`,
+and `DBDELVE_ANDROID_POSTGRES_TLS`, `DBDELVE_ANDROID_MYSQL_TLS`,
+`DBDELVE_ANDROID_MONGO_TLS` and `DBDELVE_ANDROID_POSTGRES_SELF_SIGNED` name
+servers presenting that CA's certificate (or, the last, `self.pem`). CI makes
+the certificates and servers in `.github/tls.sh`.
+
 They prove, on each engine, that:
 
 - A user created here with a password hashed on this side can log in, its
@@ -191,6 +199,10 @@ They prove, on each engine, that:
   and on Postgres and MySQL the server's own hold still refuses a write
   hidden in a function the gate reads as a plain `SELECT`.
 - Cancel stops a 30-second sleep.
+- A private CA's certificate is refused on the public roots and accepted with
+  that CA; a self-signed Postgres certificate is accepted as the CA; a user
+  the server admits only by certificate is refused without one and admitted
+  with it; and no TLS file outlives its session.
 - A read past the row limit is stopped, not drained: a twenty-million-row
   Postgres read and a multi-million-row MySQL cross join both come back in
   seconds. Inside a Postgres transaction you opened, the read is drained
@@ -221,10 +233,40 @@ The user must log in with a blank password (`trust` authentication).
   against yaSSL offer only TLS 1.0 and 1.1, so "Verified" fails and names the
   cause. Either enable TLS 1.2 on the server, or choose TLS "Off" over a
   network you trust (VPN or SSH tunnel). It never falls back to plaintext
-  silently.
+  silently. A server with a certificate from your own CA needs that CA under
+  [TLS](#tls), not Off.
 - No statement timeout is set: `max_execution_time` arrived in 5.7. Cancel
   sends `KILL QUERY` on a side connection.
 - Auth is `mysql_native_password`, 5.6's default.
+
+## TLS
+
+**Verified** (the default) means TLS 1.2 or later, with the server's
+certificate checked against a root and the host name, and it never falls back
+to plaintext. Under it, a connection can also hold:
+
+- **A trusted CA**: your own or your company's CA certificate, trusted besides
+  the public roots, so an internal server needs no public certificate. On
+  Postgres, a server's own **self-signed** certificate works here too: it is
+  trusted only byte for byte. (OpenSSL marks a self-signed certificate as a
+  CA, which the TLS library here refuses as a server's own; MySQL's and
+  MongoDB's drivers check it that way and refuse it, so on those, issue the
+  server a certificate from a CA of your own.) On MongoDB a CA given here
+  replaces the public roots, as its driver does; elsewhere it adds to them.
+- **A client certificate** and its unencrypted private key, for servers that
+  ask the client to prove who it is (Postgres `cert`, MySQL `REQUIRE X509`,
+  MongoDB `x.509`). The key is sealed by the Keystore like a password.
+
+Files are chosen with Android's file picker, and each shows its SHA-256
+fingerprint to compare with the server's administrator. Nothing here relaxes
+a check: there is no "accept any certificate". MySQL's and MongoDB's drivers
+read TLS files only from disk, so while such a session is open its PEMs sit
+in the app's private no-backup directory, deleted when it closes. A shared
+connections file carries the CA always, and the client certificate and key
+only with passwords.
+
+The live tests cover this against a private CA, a self-signed Postgres, and
+client certificates (see [Checks](#checks)).
 
 ## Connection modes
 

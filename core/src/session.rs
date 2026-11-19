@@ -96,6 +96,9 @@ pub struct Session {
     driver: Mutex<Driver>,
     mode: Mutex<Mode>,
     canceller: Canceller,
+    /// TLS files MySQL's and MongoDB's drivers read, kept until the session
+    /// closes: a side connection reads them again.
+    _tls_files: crate::tls::Files,
 }
 
 fn connect_error(message: impl ToString) -> CoreError {
@@ -117,16 +120,6 @@ fn runtime() -> Result<Runtime, CoreError> {
         .map_err(connect_error)
 }
 
-fn tls_config() -> rustls::ClientConfig {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .expect("ring supports the default protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth()
-}
-
 /// A TLS handshake MySQL 5.6 fails, named, instead of a bare alert: builds
 /// linked against yaSSL offer only TLS 1.0 and 1.1, which rustls refuses.
 fn mysql_tls_hint(error: mysql::Error, ssl: SslMode) -> CoreError {
@@ -146,30 +139,48 @@ fn mysql_tls_hint(error: mysql::Error, ssl: SslMode) -> CoreError {
              server, or reach it through a VPN or SSH tunnel with TLS off."
         ));
     }
-    connect_error(message)
+    connect_error(crate::tls::explained(&message))
 }
 
 fn postgres_error(error: tokio_postgres::Error) -> String {
     match error.as_db_error() {
         Some(db) => format!("{} {}: {}", db.severity(), db.code().code(), db.message()),
-        None => error.to_string(),
+        None => crate::tls::explained(&with_causes(&error)),
     }
+}
+
+/// An error and what caused it, which is where a TLS failure says why: the
+/// driver's own message is only "error performing TLS handshake".
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        let more = next.to_string();
+        if !text.contains(&more) {
+            text = format!("{text}: {more}");
+        }
+        cause = next.source();
+    }
+    text
 }
 
 #[uniffi::export]
 impl Session {
     #[uniffi::constructor]
     pub fn connect(config: ConnectionConfig, mode: Mode) -> Result<Arc<Self>, CoreError> {
+        let material = crate::tls::material(&config)?;
+        let files = crate::tls::files(&config)?;
         let (driver, canceller) = match config.engine {
-            Engine::Postgres => connect_postgres(&config)?,
-            Engine::MySql => connect_mysql(&config)?,
-            Engine::Mongo => connect_mongo(&config)?,
+            Engine::Postgres => connect_postgres(&config, &material)?,
+            Engine::MySql => connect_mysql(&config, &files)?,
+            Engine::Mongo => connect_mongo(&config, &files)?,
         };
         let session = Session {
             engine: config.engine,
             driver: Mutex::new(driver),
             mode: Mutex::new(mode),
             canceller,
+            _tls_files: files,
         };
         session.hold(mode)?;
         Ok(Arc::new(session))
@@ -728,7 +739,10 @@ fn empty_result() -> ResultSet {
     }
 }
 
-fn connect_postgres(config: &ConnectionConfig) -> Result<(Driver, Canceller), CoreError> {
+fn connect_postgres(
+    config: &ConnectionConfig,
+    material: &crate::tls::Material,
+) -> Result<(Driver, Canceller), CoreError> {
     let runtime = runtime()?;
     let mut pg = tokio_postgres::Config::new();
     pg.host(&config.host)
@@ -753,7 +767,7 @@ fn connect_postgres(config: &ConnectionConfig) -> Result<(Driver, Canceller), Co
             // `Require` with a verifying connector: never `prefer`, which
             // falls back to plaintext without saying so.
             pg.ssl_mode(tokio_postgres::config::SslMode::Require);
-            let tls = MakeRustlsConnect::new(tls_config());
+            let tls = MakeRustlsConnect::new(crate::tls::client_config(material)?);
             let (client, connection) = runtime
                 .block_on(pg.connect(tls.clone()))
                 .map_err(|error| connect_error(postgres_error(error)))?;
@@ -929,7 +943,10 @@ async fn run_postgres(
     Ok(result)
 }
 
-fn connect_mysql(config: &ConnectionConfig) -> Result<(Driver, Canceller), CoreError> {
+fn connect_mysql(
+    config: &ConnectionConfig,
+    files: &crate::tls::Files,
+) -> Result<(Driver, Canceller), CoreError> {
     let builder = mysql::OptsBuilder::new()
         .ip_or_hostname(Some(config.host.clone()))
         .tcp_port(config.port)
@@ -939,7 +956,17 @@ fn connect_mysql(config: &ConnectionConfig) -> Result<(Driver, Canceller), CoreE
         .tcp_connect_timeout(Some(CONNECT_TIMEOUT))
         .ssl_opts(match config.ssl_mode {
             SslMode::Disable => None,
-            SslMode::VerifyFull => Some(mysql::SslOpts::default()),
+            SslMode::VerifyFull => Some(
+                mysql::SslOpts::default()
+                    .with_root_cert_path(files.ca.clone())
+                    .with_client_identity(
+                        files
+                            .cert
+                            .clone()
+                            .zip(files.key.clone())
+                            .map(|(cert, key)| mysql::ClientIdentity::new(cert, key)),
+                    ),
+            ),
         });
     let opts = mysql::Opts::from(builder);
     let conn =
@@ -1015,7 +1042,10 @@ fn mysql_text(value: mysql::Value) -> Option<String> {
     }
 }
 
-fn connect_mongo(config: &ConnectionConfig) -> Result<(Driver, Canceller), CoreError> {
+fn connect_mongo(
+    config: &ConnectionConfig,
+    files: &crate::tls::Files,
+) -> Result<(Driver, Canceller), CoreError> {
     use mongodb::options::{ClientOptions, Credential, ServerAddress, Tls, TlsOptions};
     if config.database.is_empty() {
         return Err(connect_error("Name the database to open."));
@@ -1036,19 +1066,27 @@ fn connect_mongo(config: &ConnectionConfig) -> Result<(Driver, Canceller), CoreE
         .credential(credential)
         .tls(match config.ssl_mode {
             SslMode::Disable => Tls::Disabled,
-            SslMode::VerifyFull => Tls::Enabled(TlsOptions::default()),
+            SslMode::VerifyFull => Tls::Enabled(
+                TlsOptions::builder()
+                    .ca_file_path(files.ca.clone())
+                    .cert_key_file_path(files.cert_key.clone())
+                    .build(),
+            ),
         })
         .app_name("DBDelve Android".to_owned())
         .connect_timeout(CONNECT_TIMEOUT)
         .server_selection_timeout(CONNECT_TIMEOUT)
         .build();
     let database = runtime.block_on(async {
-        let client = mongodb::Client::with_options(options).map_err(connect_error)?;
+        let failed = |error: mongodb::error::Error| {
+            connect_error(crate::tls::explained(&with_causes(&error)))
+        };
+        let client = mongodb::Client::with_options(options).map_err(failed)?;
         let database = client.database(&config.database);
         database
             .run_command(bson::doc! { "ping": 1 })
             .await
-            .map_err(connect_error)?;
+            .map_err(failed)?;
         Ok::<_, CoreError>(database)
     })?;
     Ok((Driver::Mongo { runtime, database }, Canceller::Mongo))

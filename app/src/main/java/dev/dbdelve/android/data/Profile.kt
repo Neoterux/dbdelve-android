@@ -18,8 +18,15 @@ data class Profile(
     val database: String,
     val sslMode: SslMode,
     val mode: Mode,
+    /**
+     * A CA certificate (or a server's own self-signed one), PEM, trusted
+     * besides the public roots. Not a secret, so it lives here; a client
+     * certificate's key does not, and is in [Secrets].
+     */
+    val caPem: String? = null,
 ) {
-    fun config(password: String) = ConnectionConfig(
+    /** TLS material goes to the core only with TLS on; off, it is kept but unused. */
+    fun config(password: String, clientCert: ClientCert?, tlsDir: String) = ConnectionConfig(
         engine = engine,
         host = host,
         port = port.toUShort(),
@@ -27,6 +34,10 @@ data class Profile(
         password = password,
         database = database,
         sslMode = sslMode,
+        caPem = caPem.takeIf { sslMode == SslMode.VERIFY_FULL },
+        clientCertPem = clientCert?.cert.takeIf { sslMode == SslMode.VERIFY_FULL },
+        clientKeyPem = clientCert?.key.takeIf { sslMode == SslMode.VERIFY_FULL },
+        tlsDir = tlsDir,
     )
 
     fun toJson(): JSONObject = JSONObject()
@@ -40,6 +51,7 @@ data class Profile(
         .put("database", database)
         .put("ssl_mode", sslMode.name)
         .put("mode", mode.name)
+        .put("ca_pem", caPem)
 
     companion object {
         /**
@@ -59,6 +71,7 @@ data class Profile(
                 .getOrDefault(SslMode.VERIFY_FULL),
             mode = runCatching { Mode.valueOf(json.getString("mode")) }
                 .getOrDefault(Mode.READ_ONLY),
+            caPem = json.optString("ca_pem").takeIf { it.isNotBlank() },
         )
     }
 }

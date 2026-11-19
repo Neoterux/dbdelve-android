@@ -9,6 +9,13 @@ to its version and date.
 
 ### Added
 
+- TLS with your own CA: under Verified, add a CA certificate to trust besides
+  the public ones, so a server with an internal or self-signed certificate
+  no longer pushes you to TLS Off. On Postgres a self-signed server
+  certificate works as its own CA. Errors now say why a certificate was
+  refused and what to add.
+- Client certificates, for servers that admit users by certificate. The key is
+  sealed by the phone's Keystore, like passwords.
 - A query builder beside the SQL editor: choose a table, tap the columns,
   add filters (=, ≠, <, ≤, >, ≥, like, is null, not null), a sort and a
   limit, and see the exact statement before it runs. Run it, open it as SQL

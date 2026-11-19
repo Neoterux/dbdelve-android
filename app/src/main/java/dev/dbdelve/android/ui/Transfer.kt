@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
 import dev.dbdelve.android.AppViewModel
+import dev.dbdelve.android.data.Pem
 import dev.dbdelve.android.data.Profile
 import dev.dbdelve.android.data.SharedConnection
 import java.io.File
@@ -116,7 +117,7 @@ fun ExportDialog(model: AppViewModel, onDismiss: () -> Unit) {
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 8.dp)) {
-                    Text("Include passwords", modifier = Modifier.weight(1f))
+                    Text("Include passwords and client keys", modifier = Modifier.weight(1f))
                     Switch(checked = withPasswords, onCheckedChange = { withPasswords = it })
                 }
                 PassphraseField("Passphrase (at least $shortest characters)", passphrase) { passphrase = it }
@@ -157,6 +158,9 @@ fun ExportDialog(model: AppViewModel, onDismiss: () -> Unit) {
 /** One connection in the import review: everything it will be saved as. */
 private class Choice(shared: SharedConnection, val clashes: Boolean) {
     val originalPassword = shared.password
+    val clientCert = shared.clientCert
+    val caPem = shared.profile.caPem
+    var withClientCert by mutableStateOf(shared.clientCert != null)
     var include by mutableStateOf(true)
     var name by mutableStateOf(shared.profile.name)
     var project by mutableStateOf(shared.profile.project)
@@ -179,8 +183,9 @@ private class Choice(shared: SharedConnection, val clashes: Boolean) {
     fun valid() = name.isNotBlank() && host.isNotBlank() && portNumber() != null
 
     fun toShared() = SharedConnection(
-        Profile(id, name.trim(), project.trim(), engine, host.trim(), portNumber()!!, user, database.trim(), ssl, mode),
+        Profile(id, name.trim(), project.trim(), engine, host.trim(), portNumber()!!, user, database.trim(), ssl, mode, caPem),
         if (withPassword) originalPassword else null,
+        if (withClientCert) clientCert else null,
     )
 }
 
@@ -278,6 +283,15 @@ private fun ChoiceCard(choice: Choice) {
             Choose("Mode", Mode.entries.map { it to it.label() }, choice.mode) { choice.mode = it }
             if (choice.sentMode != Mode.READ_ONLY) {
                 Hint("It was ${choice.sentMode.label()} where it came from; here it starts Read-only unless you choose.")
+            }
+            if (choice.caPem != null) {
+                Hint("Trusts its own CA: ${Pem.describe(choice.caPem)}. Compare this with the server's administrator before you rely on it.")
+            }
+            if (choice.clientCert != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Save its client certificate and key", modifier = Modifier.weight(1f))
+                    Switch(checked = choice.withClientCert, onCheckedChange = { choice.withClientCert = it })
+                }
             }
             if (choice.originalPassword != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {

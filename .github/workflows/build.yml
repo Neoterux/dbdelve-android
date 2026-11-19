@@ -64,6 +64,12 @@ jobs:
         with:
           tool: cargo-audit
       - run: cargo audit
+      # Servers with a private CA, a self-signed certificate and client
+      # certificates, for the TLS tests.
+      - name: TLS servers
+        run: |
+          mkdir -p "$RUNNER_TEMP/tls"
+          ../.github/tls.sh "$RUNNER_TEMP/tls" >> "$GITHUB_ENV"
       - name: Tests, live ones included
         env:
           DBDELVE_ANDROID_MYSQL: 127.0.0.1:53356:root:pw:dev

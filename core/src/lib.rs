@@ -14,6 +14,7 @@ pub mod mongo_cmd;
 pub mod params;
 mod session;
 pub mod split;
+mod tls;
 pub mod users;
 
 pub use builder::{BuiltQuery, Filter, FilterOp, QuerySpec};
@@ -36,8 +37,8 @@ pub enum Engine {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum SslMode {
     Disable,
-    /// TLS 1.2 or later, the certificate checked against Mozilla's roots and
-    /// the host name.
+    /// TLS 1.2 or later, the certificate checked against Mozilla's roots (and
+    /// the connection's own CA, when it has one) and the host name.
     VerifyFull,
 }
 
@@ -51,6 +52,20 @@ pub struct ConnectionConfig {
     pub password: String,
     pub database: String,
     pub ssl_mode: SslMode,
+    /// A CA certificate, or a server's own self-signed one, in PEM, trusted
+    /// besides the public roots. The host name is still checked against it.
+    #[uniffi(default = None)]
+    pub ca_pem: Option<String>,
+    /// A client certificate chain and its unencrypted private key, in PEM,
+    /// for servers that ask the client to prove who it is.
+    #[uniffi(default = None)]
+    pub client_cert_pem: Option<String>,
+    #[uniffi(default = None)]
+    pub client_key_pem: Option<String>,
+    /// An app-private directory: MySQL's and MongoDB's drivers read TLS
+    /// material only from files, written here while the session is open.
+    #[uniffi(default = "")]
+    pub tls_dir: String,
 }
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]

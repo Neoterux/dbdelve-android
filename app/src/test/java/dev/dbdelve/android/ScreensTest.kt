@@ -66,11 +66,12 @@ class ScreensTest {
             SavedQueryStore(files),
             updates,
             installedVersion = "0.0.0",
+            tlsDir = File(files, "tls"),
         ) {}
         val shop = Profile("shop", "Shop (local)", "Demo", Engine.POSTGRES, host, port.toInt(), user, database, SslMode.DISABLE, Mode.READ_ONLY)
-        model.saveProfile(shop, null)
-        model.saveProfile(shop.copy(id = "reports", name = "Reports replica", project = "Demo", mode = Mode.READ_WRITE), null)
-        model.saveProfile(shop.copy(id = "events", name = "Events", project = "Analytics", engine = Engine.MONGO, port = 27017), null)
+        model.saveProfile(shop, null, null)
+        model.saveProfile(shop.copy(id = "reports", name = "Reports replica", project = "Demo", mode = Mode.READ_WRITE), null, null)
+        model.saveProfile(shop.copy(id = "events", name = "Events", project = "Analytics", engine = Engine.MONGO, port = 27017), null, null)
 
         compose.setContent {
             DBDelveTheme {

@@ -23,6 +23,10 @@ fn config(engine: Engine, variable: &str, ssl_mode: SslMode) -> Option<Connectio
         password: password.into(),
         database: database.into(),
         ssl_mode,
+        ca_pem: None,
+        client_cert_pem: None,
+        client_key_pem: None,
+        tls_dir: String::new(),
     })
 }
 
@@ -589,4 +593,114 @@ fn live_mysql_stops_at_the_limit() {
     );
     let after = done(run(&session, "SELECT 1"));
     assert_eq!(after.rows, vec![vec![Some("1".into())]]);
+}
+
+/// TLS past the public roots. `DBDELVE_ANDROID_TLS_CERTS` names a directory
+/// holding `ca.pem` (a private CA), `client.pem` and `client.key` (a client
+/// certificate it signed, for the user `tlsuser`). Each server variable is
+/// `host:port:user:password:database`, and its server presents a
+/// certificate that CA signed for the host, except `…_SELF_SIGNED`, whose
+/// server presents `self.pem`, a self-signed certificate, from that directory.
+fn tls_case(engine: Engine, variable: &str) -> Option<(ConnectionConfig, std::path::PathBuf)> {
+    // A directory per server: the tests run at once, and each counts its own.
+    let certs = std::path::PathBuf::from(std::env::var("DBDELVE_ANDROID_TLS_CERTS").ok()?);
+    let mut config = config(engine, variable, SslMode::VerifyFull)?;
+    config.tls_dir = std::env::temp_dir()
+        .join(format!("dbdelve-tls-{}-{variable}", std::process::id()))
+        .to_string_lossy()
+        .into_owned();
+    Some((config, certs))
+}
+
+fn read(path: &std::path::Path) -> Option<String> {
+    Some(std::fs::read_to_string(path).unwrap())
+}
+
+fn connects(config: &ConnectionConfig) -> Result<Arc<Session>, CoreError> {
+    Session::connect(config.clone(), Mode::ReadOnly)
+}
+
+/// Public roots alone refuse the private CA's certificate; with the CA it
+/// connects, and the files written for the driver are gone once it closes.
+fn trusts_only_with_the_ca(config: ConnectionConfig, ca: &std::path::Path) {
+    let refused = connects(&config)
+        .err()
+        .expect("the private CA is not a public root");
+    assert!(matches!(refused, CoreError::Connect { .. }), "{refused:?}");
+    let with_ca = ConnectionConfig {
+        ca_pem: read(ca),
+        ..config.clone()
+    };
+    let session = connects(&with_ca).unwrap();
+    done(run(
+        &session,
+        if config.engine == Engine::Mongo {
+            "db.t.find({})"
+        } else {
+            "SELECT 1"
+        },
+    ));
+    drop(session);
+    let left = std::fs::read_dir(&config.tls_dir)
+        .map(|dir| dir.count())
+        .unwrap_or(0);
+    assert_eq!(left, 0, "TLS files outlived their session");
+}
+
+/// A user the server lets in only by certificate: refused without one, in
+/// with the CA's client certificate.
+fn client_certificate(config: ConnectionConfig, certs: &std::path::Path) {
+    let with_ca = ConnectionConfig {
+        user: "tlsuser".into(),
+        password: String::new(),
+        ca_pem: read(&certs.join("ca.pem")),
+        ..config
+    };
+    assert!(connects(&with_ca).is_err(), "no client certificate");
+    let with_cert = ConnectionConfig {
+        client_cert_pem: read(&certs.join("client.pem")),
+        client_key_pem: read(&certs.join("client.key")),
+        ..with_ca
+    };
+    let session = connects(&with_cert).unwrap();
+    done(run(&session, "SELECT current_user"));
+}
+
+#[test]
+#[ignore]
+fn live_postgres_tls_private_ca() {
+    let Some((config, certs)) = tls_case(Engine::Postgres, "DBDELVE_ANDROID_POSTGRES_TLS") else {
+        return;
+    };
+    trusts_only_with_the_ca(config.clone(), &certs.join("ca.pem"));
+    client_certificate(config, &certs);
+}
+
+#[test]
+#[ignore]
+fn live_postgres_tls_self_signed() {
+    let Some((config, certs)) = tls_case(Engine::Postgres, "DBDELVE_ANDROID_POSTGRES_SELF_SIGNED")
+    else {
+        return;
+    };
+    trusts_only_with_the_ca(config, &certs.join("self.pem"));
+}
+
+#[test]
+#[ignore]
+fn live_mysql_tls_private_ca() {
+    let Some((config, certs)) = tls_case(Engine::MySql, "DBDELVE_ANDROID_MYSQL_TLS") else {
+        return;
+    };
+    trusts_only_with_the_ca(config.clone(), &certs.join("ca.pem"));
+    client_certificate(config, &certs);
+}
+
+#[test]
+#[ignore]
+fn live_mongo_tls_private_ca() {
+    let Some((config, certs)) = tls_case(Engine::Mongo, "DBDELVE_ANDROID_MONGO_TLS") else {
+        return;
+    };
+    trusts_only_with_the_ca(config, &certs.join("ca.pem"));
 }

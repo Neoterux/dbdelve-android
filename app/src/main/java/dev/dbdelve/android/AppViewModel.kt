@@ -8,6 +8,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import dev.dbdelve.android.data.ClientCert
 import dev.dbdelve.android.data.Profile
 import dev.dbdelve.android.data.ProfileStore
 import dev.dbdelve.android.data.Secrets
@@ -18,6 +19,7 @@ import dev.dbdelve.android.data.SharedConnection
 import dev.dbdelve.android.data.TabStore
 import dev.dbdelve.android.data.UpdateStore
 import dev.dbdelve.android.data.Updates
+import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -92,11 +94,23 @@ class AppViewModel(
     private val updates: UpdateStore,
     /** This build's versionName, which releases are compared against. */
     val installedVersion: String,
+    /**
+     * App-private, out of backups: MySQL's and MongoDB's drivers read TLS
+     * material only from files, which the core writes here for a session's
+     * life and deletes when it closes.
+     */
+    private val tlsDir: File,
     /** Called with the connection's name while a statement runs, null after. */
     private val keepAlive: (connection: String?) -> Unit,
 ) : ViewModel() {
     var profiles by mutableStateOf(store.load())
         private set
+
+    init {
+        // A process that died with a session open left its TLS files; none is
+        // open yet in this one.
+        tlsDir.listFiles()?.forEach { it.delete() }
+    }
     var screen by mutableStateOf<Screen>(Screen.Connections)
     var connecting by mutableStateOf<String?>(null)
         private set
@@ -128,10 +142,11 @@ class AppViewModel(
 
     val tab: QueryTab? get() = tabs.getOrNull(current)
 
-    fun saveProfile(profile: Profile, password: String?) {
+    fun saveProfile(profile: Profile, password: String?, clientCert: ClientCert?) {
         // The password is written first: a profile saved without its password
         // would connect with a blank one, which is valid, and wrong.
         password?.let { secrets.setPassword(profile.id, it) }
+        secrets.setClientCert(profile.id, clientCert)
         val next = profiles.filterNot { it.id == profile.id } + profile
         profiles = next.sortedWith(compareBy({ it.project }, { it.name }))
         store.save(profiles)
@@ -144,6 +159,9 @@ class AppViewModel(
      * rather than the app crashing.
      */
     fun password(profile: Profile): String = runCatching { secrets.password(profile.id) }.getOrDefault("")
+
+    /** The saved client certificate, or none when the Keystore can no longer open it. */
+    fun clientCert(profile: Profile): ClientCert? = runCatching { secrets.clientCert(profile.id) }.getOrNull()
 
     fun deleteProfile(profile: Profile) {
         profiles = profiles.filterNot { it.id == profile.id }
@@ -162,7 +180,9 @@ class AppViewModel(
     suspend fun exportConnections(chosen: List<Profile>, withPasswords: Boolean, passphrase: String): Result<ByteArray> =
         withContext(Dispatchers.IO) {
             runCatching {
-                val shared = chosen.map { SharedConnection(it, if (withPasswords) password(it) else null) }
+                val shared = chosen.map {
+                    SharedConnection(it, if (withPasswords) password(it) else null, if (withPasswords) clientCert(it) else null)
+                }
                 sealConnections(ConnectionBundle.toJson(shared), passphrase)
             }
         }
@@ -193,6 +213,7 @@ class AppViewModel(
                 else -> shared.profile.copy(name = uniqueName(shared.profile.name, next))
             }
             shared.password?.let { secrets.setPassword(profile.id, it) }
+            shared.clientCert?.let { secrets.setClientCert(profile.id, it) }
             next = next.filterNot { it.id == profile.id } + profile
             imported++
         }
@@ -253,7 +274,10 @@ class AppViewModel(
         connectError = null
         viewModelScope.launch {
             val opened = withContext(Dispatchers.IO) {
-                runCatching { Session.connect(profile.config(secrets.password(profile.id)), profile.mode) }
+                runCatching {
+                    val config = profile.config(secrets.password(profile.id), secrets.clientCert(profile.id), tlsDir.path)
+                    Session.connect(config, profile.mode)
+                }
             }
             connecting = null
             opened.onSuccess { opened ->
