@@ -358,8 +358,9 @@ since this app's MongoDB commands take no cursor chains.
 
 ## Saved queries and parameters
 
-Save the tab you are writing (the bookmark with a plus, under the editor) and
-it is kept for that connection; the bookmarks beside it open the list. Write `:name` wherever a value
+Save the tab you are writing (the bookmarks under the editor, then **Save
+this query**) and it is kept for that connection; **Saved queries** in the
+same menu opens the list. Write `:name` wherever a value
 goes:
 
 ```sql
@@ -372,6 +373,26 @@ literal (a string quoted, a number checked to be one), never as text spliced
 into the statement, and the filled statement passes the same gate as anything
 typed. A `:name` inside a string, a comment or a Postgres `::cast` is not a
 parameter. On MongoDB, `db.orders.find({status: :status})` works the same way.
+
+## Explain
+
+The plan icon under the editor explains the statement under the cursor:
+**Plan** shows how the server would run it and runs nothing; **Plan with
+timings** (`EXPLAIN ANALYZE`, or MongoDB's `executionStats`) runs it to
+measure. It is a copy: the editor's text is never changed, and the plan
+shows as the tab's result, a Postgres plan as text rather than cells.
+
+- With timings, the statement runs, so the gate treats it as the statement
+  itself: `EXPLAIN ANALYZE DELETE …` needs Full and asks first, as the
+  `DELETE` would. A plain plan of a write passes in Read-only on Postgres;
+  MySQL's own read-only hold refuses even to plan one there.
+- On MongoDB, a `find`, `aggregate` or `countDocuments` is sent with the
+  server's `explain` command, and its plan is shown as one row per stage:
+  the stage (`COLLSCAN`, `IXSCAN`…), its index, what it returned, the
+  documents and keys it examined, its time, and its filter or index bounds,
+  with the totals first. `db.c.find(…).explain()` and
+  `.explain('executionStats')` also work typed. Writes are not explained.
+- `EXPLAIN ANALYZE` on MySQL needs 8.0.18; on 5.6 the server's error says so.
 
 ## History
 
@@ -452,7 +473,7 @@ Deliberate cuts, not oversights; those with a ceiling in the code are marked
   doesn't have.
 - **Results across restarts.** Query tabs and their text are kept per
   connection; results are not, and nothing runs again on its own.
-- **Command palette, completion, Explain, and the tablet
+- **Command palette, completion, and the tablet
   layout from the mockup** ([docs/mockup.html](docs/mockup.html)).
 
 ## What has and hasn't been compiled

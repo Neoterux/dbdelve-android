@@ -131,6 +131,58 @@ pub fn build_query(engine: Engine, spec: QuerySpec) -> BuiltQuery {
     builder::build(engine, &spec)
 }
 
+/// The statement that explains `statement`: `EXPLAIN` before SQL,
+/// `.explain(…)` after a MongoDB read. With `analyze` it runs the statement
+/// for its timings (`EXPLAIN ANALYZE`, `executionStats`), and then passes the
+/// gate as the statement itself would: explaining a write that way is the
+/// write. The text the user typed is never changed; this is a copy.
+#[uniffi::export]
+pub fn explain_statement(
+    engine: Engine,
+    statement: String,
+    analyze: bool,
+) -> Result<String, CoreError> {
+    let refused = |reason: &str| CoreError::Query {
+        reason: reason.to_owned(),
+    };
+    let statement = statement.trim().trim_end_matches(';').trim_end();
+    if statement.is_empty() {
+        return Err(refused("Nothing to explain."));
+    }
+    match engine {
+        Engine::Postgres | Engine::MySql => {
+            let first = statement
+                .split(|c: char| c.is_whitespace() || c == '(')
+                .next()
+                .unwrap_or_default();
+            if first.eq_ignore_ascii_case("explain") {
+                return Err(refused("That is already an EXPLAIN."));
+            }
+            Ok(format!(
+                "EXPLAIN {}{statement}",
+                if analyze { "ANALYZE " } else { "" }
+            ))
+        }
+        Engine::Mongo => {
+            let command = mongo_cmd::parse(statement).map_err(|reason| refused(&reason))?;
+            if command.explain.is_some() {
+                return Err(refused("That is already an explain."));
+            }
+            if !mongo_cmd::explainable(&command.call) {
+                return Err(refused(
+                    "Only find, aggregate and countDocuments can be explained here.",
+                ));
+            }
+            let verbosity = if analyze {
+                mongo_cmd::Verbosity::ExecutionStats
+            } else {
+                mongo_cmd::Verbosity::QueryPlanner
+            };
+            Ok(format!("{statement}.explain(\"{}\")", verbosity.name()))
+        }
+    }
+}
+
 /// Seals the app's connections JSON into a file to share, under a passphrase.
 #[uniffi::export]
 pub fn seal_connections(json: String, passphrase: String) -> Result<Vec<u8>, CoreError> {

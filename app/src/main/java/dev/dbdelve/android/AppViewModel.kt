@@ -41,6 +41,7 @@ import uniffi.dbdelve_core.Session
 import uniffi.dbdelve_core.Stop
 import uniffi.dbdelve_core.UserAction
 import uniffi.dbdelve_core.Verdict
+import uniffi.dbdelve_core.explainStatement
 import uniffi.dbdelve_core.fillParameters
 import uniffi.dbdelve_core.openConnections
 import uniffi.dbdelve_core.sealConnections
@@ -417,6 +418,24 @@ class AppViewModel(
         newTab("History", entry.text)
         input = QueryInput.TEXT
         pane = Pane.QUERY
+    }
+
+    /**
+     * Explains the statement under the cursor: `EXPLAIN` (or MongoDB's
+     * `.explain()`) on a copy, sent like anything typed, its plan shown as
+     * this tab's result. The text in the editor is never touched. With
+     * [analyze] it runs the statement for its timings, and the gate then
+     * treats it as the statement itself. Returns why it could not, or null.
+     */
+    fun explain(analyze: Boolean): String? {
+        val tab = tab ?: return null
+        val session = session ?: return "Not connected."
+        val text = tab.text.text
+        val span = statementAt(session.engine(), text, tab.text.selection.start.toUInt()) ?: return "Nothing to explain."
+        val statement = text.substring(span.start.toInt(), span.end.toInt())
+        val explained = runCatching { explainStatement(session.engine(), statement, analyze) }.getOrElse { return it.reason() }
+        execute(tab, explained, emptyList(), runOnce = false, onceIn = null)
+        return null
     }
 
     /** Runs the statement under the cursor, as typed. */

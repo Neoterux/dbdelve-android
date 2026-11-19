@@ -1098,6 +1098,9 @@ async fn run_mongo(
     let Some(collection) = command.collection else {
         return run_mongo_users(database, command.call, limit).await;
     };
+    if let Some(verbosity) = command.explain {
+        return explain_mongo(database, &collection, command.call, verbosity).await;
+    }
     let collection = database.collection::<Document>(&collection);
     let one = |name: &str, value: u64| ResultSet {
         columns: vec![Column {
@@ -1179,6 +1182,163 @@ async fn run_mongo(
         _ => Err(query_error(
             "That method belongs to the database: db.<method>(…).",
         )),
+    }
+}
+
+/// The server's `explain` of a find, an aggregate or a count, as one row per
+/// stage of the plan: what it is, the index it uses, and with
+/// `executionStats` what it read and returned and how long it took, and the
+/// filter or index bounds it applies.
+async fn explain_mongo(
+    database: &mongodb::Database,
+    collection: &str,
+    call: Call,
+    verbosity: mongo_cmd::Verbosity,
+) -> Result<ResultSet, CoreError> {
+    let explained = match call {
+        Call::Find { filter, projection } => {
+            let mut find = bson::doc! { "find": collection, "filter": filter };
+            if let Some(projection) = projection {
+                find.insert("projection", projection);
+            }
+            find
+        }
+        Call::Aggregate { pipeline } => {
+            bson::doc! { "aggregate": collection, "pipeline": pipeline, "cursor": {} }
+        }
+        Call::Count { filter } => bson::doc! { "count": collection, "query": filter },
+        _ => {
+            return Err(query_error(
+                "Only find, aggregate and countDocuments can be explained here.",
+            ));
+        }
+    };
+    let reply = database
+        .run_command(bson::doc! { "explain": explained, "verbosity": verbosity.name() })
+        .await
+        .map_err(query_error)?;
+    Ok(plan_rows(&reply))
+}
+
+/// One row per stage, outermost first, its depth shown by indenting.
+fn plan_rows(reply: &Document) -> ResultSet {
+    let names = [
+        "stage",
+        "index",
+        "returned",
+        "docs examined",
+        "keys examined",
+        "ms",
+        "detail",
+    ];
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    let number = |stage: &Document, key: &str| -> Option<String> {
+        match stage.get(key)? {
+            Bson::Int32(n) => Some(n.to_string()),
+            Bson::Int64(n) => Some(n.to_string()),
+            Bson::Double(n) => Some(n.to_string()),
+            _ => None,
+        }
+    };
+    fn walk(
+        stage: &Document,
+        depth: usize,
+        rows: &mut Vec<Vec<Option<String>>>,
+        number: &dyn Fn(&Document, &str) -> Option<String>,
+    ) {
+        // An SBE plan wraps the classic one in `queryPlan`.
+        if let Ok(inner) = stage.get_document("queryPlan") {
+            return walk(inner, depth, rows, number);
+        }
+        if let Ok(name) = stage.get_str("stage") {
+            rows.push(vec![
+                Some(format!("{}{name}", "  ".repeat(depth))),
+                stage.get_str("indexName").ok().map(str::to_owned),
+                number(stage, "nReturned"),
+                number(stage, "docsExamined"),
+                number(stage, "keysExamined"),
+                number(stage, "executionTimeMillisEstimate"),
+                ["indexBounds", "filter"]
+                    .iter()
+                    .find_map(|key| stage.get_document(key).ok())
+                    .map(|detail| {
+                        Bson::Document(detail.clone())
+                            .into_relaxed_extjson()
+                            .to_string()
+                    }),
+            ]);
+        }
+        for key in ["inputStage", "outerStage", "innerStage"] {
+            if let Ok(child) = stage.get_document(key) {
+                walk(child, depth + 1, rows, number);
+            }
+        }
+        if let Ok(children) = stage.get_array("inputStages") {
+            for child in children.iter().filter_map(Bson::as_document) {
+                walk(child, depth + 1, rows, number);
+            }
+        }
+    }
+    // The plan run, with its numbers, when there is one; else the plan chosen.
+    let plan_of = |explain: &Document, rows: &mut Vec<Vec<Option<String>>>| {
+        if let Ok(stats) = explain.get_document("executionStats") {
+            rows.push(vec![
+                Some("total".to_owned()),
+                None,
+                number(stats, "nReturned"),
+                number(stats, "totalDocsExamined"),
+                number(stats, "totalKeysExamined"),
+                number(stats, "executionTimeMillis"),
+                None,
+            ]);
+            if let Ok(stages) = stats.get_document("executionStages") {
+                walk(stages, 1, rows, &number);
+                return;
+            }
+        }
+        if let Ok(plan) = explain
+            .get_document("queryPlanner")
+            .and_then(|planner| planner.get_document("winningPlan"))
+        {
+            walk(plan, 1, rows, &number);
+        }
+    };
+    match reply.get_array("stages") {
+        // An aggregate the server did not push down whole: its pipeline, the
+        // first stage holding the query's own plan.
+        Ok(stages) => {
+            for stage in stages.iter().filter_map(Bson::as_document) {
+                let Some((name, body)) = stage.iter().next() else {
+                    continue;
+                };
+                rows.push(vec![
+                    Some(name.clone()),
+                    None,
+                    number(stage, "nReturned"),
+                    None,
+                    None,
+                    number(stage, "executionTimeMillisEstimate"),
+                    None,
+                ]);
+                if let (Some(explain), "$cursor") = (body.as_document(), name.as_str()) {
+                    plan_of(explain, &mut rows);
+                }
+            }
+        }
+        Err(_) => plan_of(reply, &mut rows),
+    }
+    ResultSet {
+        columns: names
+            .iter()
+            .map(|name| Column {
+                name: (*name).to_owned(),
+                type_tag: String::new(),
+            })
+            .collect(),
+        rows,
+        capped: false,
+        affected: None,
+        elapsed_ms: 0,
     }
 }
 

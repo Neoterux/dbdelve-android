@@ -14,6 +14,10 @@ to its version and date.
   no longer pushes you to TLS Off. On Postgres a self-signed server
   certificate works as its own CA. Errors now say why a certificate was
   refused and what to add.
+- Explain, under the editor: the plan of the statement under the cursor,
+  or the plan with timings, which runs it (and asks first, as the statement
+  would, if it writes). Your text is left as it is. MongoDB plans show one
+  row per stage, with the index used and the documents examined.
 - History for each connection: every statement sent, exactly as sent, with
   when it ran and its rows, rows affected or error. Tap one to open it in a
   tab; search it, copy from it, or clear it.
@@ -32,6 +36,8 @@ to its version and date.
 
 ### Changed
 
+- Saved queries and Save this query share one bookmark menu under the editor,
+  making room for History and Explain.
 - A running statement keeps running when you leave the app with Back or
   swipe it away from recent apps, and its result is there when you come
   back. Leaving closes the connection once nothing is running on it.

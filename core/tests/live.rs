@@ -918,3 +918,167 @@ fn live_builder_mongo() {
     setup(&session, "db.android_sampled.drop()");
     setup(&session, "db.android_built.drop()");
 }
+
+fn explained(session: &Session, statement: &str, analyze: bool) -> RunOutcome {
+    let text =
+        dbdelve_core::explain_statement(session.engine(), statement.into(), analyze).unwrap();
+    session.run(text, 1000, Vec::new(), false, None).unwrap()
+}
+
+/// A plan, and with analyze a plan run, in Read-only; analyzing a write is
+/// the write, so it stops at the gate; the text explained is untouched.
+fn explains_sql(session: &Session, table: &str) {
+    let plan = done(explained(
+        session,
+        &format!("SELECT * FROM {table} WHERE id = 2"),
+        false,
+    ));
+    assert!(!plan.rows.is_empty());
+    assert!(matches!(
+        explained(session, &format!("DELETE FROM {table}"), true),
+        RunOutcome::Stopped { .. }
+    ));
+    // EXPLAIN alone runs nothing, so the gate lets it through in Read-only.
+    // MySQL's own read-only hold still refuses to plan a write: the backstop
+    // is stricter than the gate there, never looser.
+    let text = dbdelve_core::explain_statement(
+        session.engine(),
+        format!("DELETE FROM {table} WHERE id = 1"),
+        false,
+    )
+    .unwrap();
+    match session.run(text, 1000, Vec::new(), false, None) {
+        Ok(RunOutcome::Done { .. }) => assert_eq!(session.engine(), Engine::Postgres),
+        Err(CoreError::Query { reason }) => {
+            assert_eq!(session.engine(), Engine::MySql);
+            assert!(reason.contains("READ ONLY"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+#[ignore]
+fn live_explain_postgres() {
+    let Some(config) = config(
+        Engine::Postgres,
+        "DBDELVE_ANDROID_POSTGRES",
+        SslMode::Disable,
+    ) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_explain");
+    setup(
+        &session,
+        "CREATE TABLE android_explain (id int PRIMARY KEY, label text)",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_explain SELECT n, 'x' FROM generate_series(1, 50) n",
+    );
+    explains_sql(&session, "android_explain");
+    let analyzed = done(explained(
+        &session,
+        "SELECT count(*) FROM android_explain",
+        true,
+    ));
+    let text: Vec<String> = analyzed
+        .rows
+        .iter()
+        .map(|row| row[0].clone().unwrap())
+        .collect();
+    assert!(
+        text.iter().any(|line| line.contains("actual time")),
+        "{text:?}"
+    );
+    setup(&session, "DROP TABLE android_explain");
+}
+
+#[test]
+#[ignore]
+fn live_explain_mysql() {
+    let Some(config) = config(Engine::MySql, "DBDELVE_ANDROID_MYSQL", SslMode::Disable) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "DROP TABLE IF EXISTS android_explain");
+    setup(
+        &session,
+        "CREATE TABLE android_explain (id int PRIMARY KEY, label text)",
+    );
+    setup(
+        &session,
+        "INSERT INTO android_explain VALUES (1, 'a'), (2, 'b')",
+    );
+    explains_sql(&session, "android_explain");
+    setup(&session, "DROP TABLE android_explain");
+}
+
+#[test]
+#[ignore]
+fn live_explain_mongo() {
+    let Some(config) = config(Engine::Mongo, "DBDELVE_ANDROID_MONGO", SslMode::Disable) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    setup(&session, "db.android_explain.drop()");
+    let many: Vec<String> = (0..60)
+        .map(|n| format!("{{n: {n}, kind: 'k{}'}}", n % 3))
+        .collect();
+    setup(
+        &session,
+        &format!("db.android_explain.insertMany([{}])", many.join(", ")),
+    );
+
+    let stages = |result: &dbdelve_core::ResultSet| -> Vec<String> {
+        for row in &result.rows {
+            assert_eq!(row.len(), result.columns.len(), "{row:?}");
+        }
+        result
+            .rows
+            .iter()
+            .map(|row| row[0].clone().unwrap().trim().to_owned())
+            .collect()
+    };
+    let scan = done(explained(
+        &session,
+        "db.android_explain.find({n: {$gt: 40}})",
+        false,
+    ));
+    assert!(
+        stages(&scan).contains(&"COLLSCAN".to_owned()),
+        "{:?}",
+        scan.rows
+    );
+
+    let run = done(explained(
+        &session,
+        "db.android_explain.find({n: {$gt: 40}})",
+        true,
+    ));
+    let total = &run.rows[0];
+    assert_eq!(total[0].as_deref(), Some("total"));
+    assert_eq!(total[2].as_deref(), Some("19"), "returned");
+    assert_eq!(total[3].as_deref(), Some("60"), "docs examined");
+
+    for statement in [
+        "db.android_explain.aggregate([{$match: {n: {$lt: 10}}}, {$group: {_id: '$kind', c: {$sum: 1}}}])",
+        "db.android_explain.countDocuments({kind: 'k1'})",
+    ] {
+        for analyze in [false, true] {
+            let plan = done(explained(&session, statement, analyze));
+            assert!(!stages(&plan).is_empty(), "{statement}: {:?}", plan.rows);
+        }
+    }
+    assert!(
+        dbdelve_core::explain_statement(
+            Engine::Mongo,
+            "db.android_explain.deleteMany({})".into(),
+            true
+        )
+        .is_err(),
+        "a write is not explained"
+    );
+    setup(&session, "db.android_explain.drop()");
+}

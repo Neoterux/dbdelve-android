@@ -185,6 +185,19 @@ class ScreensTest {
         compose.runOnIdle { model.pane = Pane.QUERY }
         compose.onNodeWithContentDescription("History").performClick()
         shot("12-history")
+
+        compose.runOnIdle {
+            model.pane = Pane.QUERY
+            model.newTab("plan", "SELECT * FROM orders WHERE status = 'paid' ORDER BY total DESC;")
+            model.edit(model.tab!!, textAt(model.tab!!.text.text))
+            check(model.explain(analyze = true) == null)
+        }
+        await { model.tab?.result != null || model.tab?.error != null }
+        check(model.tab?.error == null) { "explain failed: ${model.tab?.error}" }
+        check(model.tab?.text?.text == "SELECT * FROM orders WHERE status = 'paid' ORDER BY total DESC;") { "explain touched the buffer" }
+        shot("13-explain")
+        compose.runOnIdle { model.pane = Pane.QUERY }
+        shot("14-editor-tools")
     }
 
     /**

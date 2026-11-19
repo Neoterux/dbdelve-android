@@ -103,6 +103,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.BookmarkAdd
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Bookmarks
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.CheckCircleOutline
@@ -486,17 +487,69 @@ private fun Editor(model: AppViewModel) {
         val haptics = LocalHapticFeedback.current
         var savedOpen by remember { mutableStateOf(false) }
         var historyOpen by remember { mutableStateOf(false) }
+        var bookmarksOpen by remember { mutableStateOf(false) }
+        var explainOpen by remember { mutableStateOf(false) }
+        var explainError by remember { mutableStateOf<String?>(null) }
         var saving by remember { mutableStateOf(false) }
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             RowLimit(model)
             IconButton(onClick = { historyOpen = true }) { Icon(Icons.Default.History, contentDescription = "History") }
-            IconButton(onClick = { savedOpen = true }) { Icon(Icons.Default.Bookmarks, contentDescription = "Saved queries") }
-            IconButton(onClick = { saving = true }, enabled = tab.text.text.isNotBlank()) {
-                Icon(Icons.Default.BookmarkAdd, contentDescription = "Save this query")
+            Box {
+                IconButton(onClick = { explainOpen = true }, enabled = next != null && !model.running) {
+                    Icon(Icons.Default.AccountTree, contentDescription = "Explain")
+                }
+                DropdownMenu(expanded = explainOpen, onDismissRequest = { explainOpen = false }) {
+                    val mongo = engine == uniffi.dbdelve_core.Engine.MONGO
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text("Plan")
+                                Text("How it would run. Runs nothing.", fontSize = 12.sp, color = palette.faint)
+                            }
+                        },
+                        onClick = {
+                            explainOpen = false
+                            explainError = model.explain(analyze = false)
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(if (mongo) "Plan with execution stats" else "Plan with timings (ANALYZE)")
+                                Text("Runs it to measure; a write still asks first.", fontSize = 12.sp, color = palette.faint)
+                            }
+                        },
+                        onClick = {
+                            explainOpen = false
+                            explainError = model.explain(analyze = true)
+                        },
+                    )
+                }
+            }
+            Box {
+                IconButton(onClick = { bookmarksOpen = true }) { Icon(Icons.Default.Bookmarks, contentDescription = "Saved queries") }
+                DropdownMenu(expanded = bookmarksOpen, onDismissRequest = { bookmarksOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Saved queries") },
+                        leadingIcon = { Icon(Icons.Default.Bookmarks, null) },
+                        onClick = {
+                            bookmarksOpen = false
+                            savedOpen = true
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Save this query") },
+                        leadingIcon = { Icon(Icons.Default.BookmarkAdd, null) },
+                        enabled = tab.text.text.isNotBlank(),
+                        onClick = {
+                            bookmarksOpen = false
+                            saving = true
+                        },
+                    )
+                }
             }
             Spacer(Modifier.weight(1f))
             if (model.running) {
@@ -513,7 +566,7 @@ private fun Editor(model: AppViewModel) {
                         model.runAtCursor()
                     },
                     enabled = next != null,
-                    contentPadding = PaddingValues(horizontal = 24.dp, vertical = 12.dp),
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
                 ) {
                     Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
                     Text("Run", modifier = Modifier.padding(start = 6.dp))
@@ -522,6 +575,14 @@ private fun Editor(model: AppViewModel) {
         }
         if (savedOpen) SavedQueriesSheet(model) { savedOpen = false }
         if (historyOpen) HistorySheet(model) { historyOpen = false }
+        explainError?.let { reason ->
+            AlertDialog(
+                onDismissRequest = { explainError = null },
+                title = { Text("Can't explain this") },
+                text = { Text(reason) },
+                confirmButton = { TextButton(onClick = { explainError = null }) { Text("OK") } },
+            )
+        }
         if (saving) {
             SaveQueryDialog(
                 initial = tab.title.takeUnless { it.startsWith("Query ") }.orEmpty(),
@@ -650,12 +711,32 @@ private fun ResultsPane(model: AppViewModel) {
             Text(error, fontFamily = Mono, fontSize = 13.sp, modifier = Modifier.padding(vertical = 10.dp))
             tab?.ran?.let { Statement(it) }
         }
-        result != null -> Rows(result, tab?.title.orEmpty())
+        result != null -> Rows(result, tab?.title.orEmpty(), plan = tab?.ran?.let(::isTextPlan) == true && result.columns.size == 1)
     }
 }
 
+/** A plan the server returns as lines of text (Postgres, MySQL's ANALYZE), best read as text. */
+private fun isTextPlan(ran: String): Boolean = ran.trimStart().startsWith("EXPLAIN", ignoreCase = true)
+
+/** A text plan: one line per row, unwrapped, scrolled sideways rather than cut. */
 @Composable
-private fun Rows(result: ResultSet, title: String) {
+private fun PlanText(result: ResultSet) {
+    Text(
+        result.rows.joinToString("\n") { it.firstOrNull().orEmpty() },
+        fontFamily = Mono,
+        fontSize = 12.sp,
+        lineHeight = 17.sp,
+        softWrap = false,
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .horizontalScroll(rememberScrollState())
+            .padding(12.dp),
+    )
+}
+
+@Composable
+private fun Rows(result: ResultSet, title: String, plan: Boolean = false) {
     val palette = LocalPalette.current
     val clipboard = LocalClipboardManager.current
     var records by remember { mutableStateOf(false) }
@@ -697,6 +778,7 @@ private fun Rows(result: ResultSet, title: String) {
         Box(Modifier.weight(1f)) {
             when {
                 result.columns.isEmpty() -> Centered(result.affected?.let { "$it rows affected" } ?: "Done")
+                plan && !records -> PlanText(result)
                 records -> Records(result) { opened = it }
                 else -> Grid(result) { opened = it }
             }
