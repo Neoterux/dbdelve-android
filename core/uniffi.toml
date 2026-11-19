@@ -1,0 +1,5 @@
+# The Kotlin bindings. The default cleaner, java.lang.ref.Cleaner, only
+# exists from Android 13 (API 33); this one checks the version at runtime,
+# using Android's SystemCleaner from 14 and JNA's own cleaner below it.
+[bindings.kotlin]
+android_cleaner = true
