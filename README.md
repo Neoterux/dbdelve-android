@@ -55,10 +55,15 @@ Drawn by `ScreensTest` from the app's own screens, connected to a Postgres
 - **No CPU-specific tuning of the Rust core.** It waits on the network, not
   the CPU, and rustls's crypto already detects and uses the chip's AES and SHA
   instructions at runtime.
+- **The session belongs to the process, not the screen.** A back gesture,
+  swiping DBDelve from recents or Android destroying the activity leaves a
+  running statement running; reopening the app finds it, its tabs and its
+  results. Once the screen is gone for good, the session closes, at once or
+  when the statement running ends.
 - **A foreground service while a statement runs** (`QueryService`), because
-  some Android builds reclaim background apps within minutes. For long
-  statements, also allow DBDelve to run in the background in the phone's
-  battery settings.
+  some Android builds reclaim background apps within minutes, and that would
+  end the process and the session with it. For long statements, also allow
+  DBDelve to run in the background in the phone's battery settings.
 - **The mode prompt takes face unlock, fingerprint or PIN.** It accepts weak
   biometrics, and many phones' face unlock is not a strong biometric.
 
@@ -413,9 +418,6 @@ Deliberate cuts, not oversights; those with a ceiling in the code are marked
   doesn't have.
 - **Results across restarts.** Query tabs and their text are kept per
   connection; results are not, and nothing runs again on its own.
-- **A session that outlives its screen.** The foreground service keeps the
-  process alive, but the session belongs to the view model, so a statement
-  still ends if Android destroys the activity outright.
 - **Command palette, query history, completion, Explain, and the tablet
   layout from the mockup** ([docs/mockup.html](docs/mockup.html)).
 

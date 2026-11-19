@@ -26,6 +26,9 @@ to its version and date.
 
 ### Changed
 
+- A running statement keeps running when you leave the app with Back or
+  swipe it away from recent apps, and its result is there when you come
+  back. Leaving closes the connection once nothing is running on it.
 - Query tabs are chips that show whether each one ran or failed, and the
   open one stays in view.
 - Icons throughout: the bottom bar, the editor's save, saved queries and row

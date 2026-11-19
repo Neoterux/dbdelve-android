@@ -6,8 +6,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
 import dev.dbdelve.android.data.ClientCert
 import dev.dbdelve.android.data.Profile
 import dev.dbdelve.android.data.ProfileStore
@@ -20,7 +18,9 @@ import dev.dbdelve.android.data.TabStore
 import dev.dbdelve.android.data.UpdateStore
 import dev.dbdelve.android.data.Updates
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -86,6 +86,15 @@ fun Throwable.reason(): String = when (this) {
     else -> message ?: toString()
 }
 
+/**
+ * The app's state and its open session, for the whole process rather than for
+ * one screen: [DBDelveApp] holds it, so an activity Android destroys (a back
+ * gesture, swiping the app from recents, a reclaimed task) leaves a running
+ * statement running. [QueryService] keeps the process at foreground priority
+ * while one does, and a new activity picks up the same session, tabs and
+ * results. When the screen goes for good, [screenGone] closes the session,
+ * at once or when the statement running ends.
+ */
 class AppViewModel(
     private val store: ProfileStore,
     private val secrets: Secrets,
@@ -102,7 +111,10 @@ class AppViewModel(
     private val tlsDir: File,
     /** Called with the connection's name while a statement runs, null after. */
     private val keepAlive: (connection: String?) -> Unit,
-) : ViewModel() {
+) {
+    /** Lives as long as the process; the main thread, as Compose state wants. */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
     var profiles by mutableStateOf(store.load())
         private set
 
@@ -272,7 +284,7 @@ class AppViewModel(
         if (connecting != null) return
         connecting = profile.id
         connectError = null
-        viewModelScope.launch {
+        scope.launch {
             val opened = withContext(Dispatchers.IO) {
                 runCatching {
                     val config = profile.config(secrets.password(profile.id), secrets.clientCert(profile.id), tlsDir.path)
@@ -307,7 +319,7 @@ class AppViewModel(
         review = null
         userMessage = null
         screen = Screen.Connections
-        viewModelScope.launch(Dispatchers.IO) { closing?.close() }
+        scope.launch(Dispatchers.IO) { closing?.close() }
     }
 
     fun newTab(title: String = "Query ${nextTabId + 1}", text: String = ""): QueryTab {
@@ -360,7 +372,7 @@ class AppViewModel(
         val snapshot = tabs.map { TabStore.Saved(it.title, it.text.text) }
         val at = current
         saving?.cancel()
-        saving = viewModelScope.launch {
+        saving = scope.launch {
             if (!now) delay(600)
             withContext(Dispatchers.IO) { tabStore.save(id, snapshot, at) }
         }
@@ -417,15 +429,11 @@ class AppViewModel(
         if (running) return
         running = true
         keepAlive(profile?.name)
-        // ponytail: the service keeps the process alive, but the session lives
-        // in the view model, so a statement still ends if Android destroys the
-        // activity outright. A service that owns the session is the upgrade path.
-        viewModelScope.launch {
+        scope.launch {
             val outcome = try {
                 withContext(Dispatchers.IO) { runCatching { call(session) } }
             } finally {
-                // Also when the view model is cleared mid-statement (the app
-                // swiped away): otherwise the foreground service outlives it.
+                // However it ends: otherwise the foreground service outlives it.
                 keepAlive(null)
                 if (this@AppViewModel.session === session) running = false
             }
@@ -439,6 +447,12 @@ class AppViewModel(
                         gate = PendingGate(shown, outcome.stop, outcome.verdict, confirmed, onceIn, retry)
                 }
             }.onFailure { failed(it.reason()) }
+            // The screen went while this ran: its outcome is kept (history),
+            // and now nothing is left to keep the connection open for.
+            if (closeWhenIdle) {
+                closeWhenIdle = false
+                disconnect()
+            }
         }
     }
 
@@ -489,7 +503,7 @@ class AppViewModel(
     fun refreshUsers() {
         val session = session ?: return
         refreshingUsers = true
-        viewModelScope.launch {
+        scope.launch {
             val listed = withContext(Dispatchers.IO) { runCatching { session.users() } }
             refreshingUsers = false
             listed.onSuccess {
@@ -501,7 +515,7 @@ class AppViewModel(
 
     fun loadGrants(account: Account) {
         val session = session ?: return
-        viewModelScope.launch {
+        scope.launch {
             val read = withContext(Dispatchers.IO) { runCatching { session.userGrants(account) } }
             grants = grants + (account to read.getOrElse { listOf(it.reason()) })
         }
@@ -510,7 +524,7 @@ class AppViewModel(
     /** Builds the statement for [action] and holds it for the user to read. */
     fun prepare(title: String, action: UserAction) {
         val session = session ?: return
-        viewModelScope.launch {
+        scope.launch {
             val built = withContext(Dispatchers.IO) { runCatching { session.prepareUser(action) } }
             built.onSuccess { review = Review(title, it) }
                 .onFailure { userMessage = it.reason() }
@@ -553,7 +567,7 @@ class AppViewModel(
     fun setMode(next: Mode, then: () -> Unit = {}) {
         val session = session ?: return
         val profile = profile ?: return
-        viewModelScope.launch {
+        scope.launch {
             val changed = withContext(Dispatchers.IO) { runCatching { session.setMode(next) } }
             // It may complete after the user left this connection: the
             // profile still takes the mode, the screen of another does not.
@@ -584,7 +598,7 @@ class AppViewModel(
     fun refreshCatalog() {
         val session = session ?: return
         refreshingCatalog = true
-        viewModelScope.launch {
+        scope.launch {
             val listed = withContext(Dispatchers.IO) { runCatching { session.catalog() } }
             refreshingCatalog = false
             listed.onSuccess {
@@ -607,7 +621,7 @@ class AppViewModel(
         builder = state
         input = QueryInput.BUILDER
         pane = Pane.QUERY
-        viewModelScope.launch {
+        scope.launch {
             val read = withContext(Dispatchers.IO) { runCatching { session.columns(entry.schema, entry.name) } }
             if (builder !== state) return@launch
             state.loadingColumns = false
@@ -673,7 +687,7 @@ class AppViewModel(
         if (checkingUpdates) return
         if (!manual && (!updates.automatic || System.currentTimeMillis() - updates.lastCheck < UPDATE_INTERVAL)) return
         checkingUpdates = true
-        viewModelScope.launch {
+        scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { Updates.fetchLatest() } }
             checkingUpdates = false
             result.onSuccess { latest ->
@@ -696,8 +710,22 @@ class AppViewModel(
         update = null
     }
 
-    override fun onCleared() {
-        session?.close()
+    /** Set when the screen went for good mid-statement: disconnect once it ends. */
+    private var closeWhenIdle = false
+
+    /** A screen is showing this state again: whatever it holds stays open. */
+    fun screenShown() {
+        closeWhenIdle = false
+    }
+
+    /**
+     * The last screen finished for good (not a rotation). A statement running
+     * runs on, and the session closes when it ends; otherwise now, so a
+     * cached process does not hold a server connection nobody can see.
+     */
+    fun screenGone() {
+        if (session == null) return
+        if (running) closeWhenIdle = true else disconnect()
     }
 
     private companion object {

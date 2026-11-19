@@ -17,10 +17,12 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
- * Holds the process at foreground priority while a statement runs, and
- * nothing else: the session stays in the view model. Some Android builds
- * reclaim background apps within minutes, which would drop a long statement
- * the moment the user switched away to check something.
+ * Holds the process at foreground priority while a statement runs. The
+ * session itself belongs to the process ([DBDelveApp]), not to a screen, so
+ * with this holding the process a statement outlives its activity: a back
+ * gesture, a swipe from recents, a destroyed task. Some Android builds
+ * reclaim background apps within minutes, which would otherwise drop a long
+ * statement the moment the user switched away to check something.
  *
  * It stops itself, after entering the foreground, once [running] clears.
  * Stopping it from outside could land before `startForeground`, which

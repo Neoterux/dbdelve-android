@@ -9,6 +9,7 @@
     <!-- No backup: passwords are sealed by a Keystore key that never leaves
          this device, so a restored copy could not open them anyway. -->
     <application
+        android:name=".DBDelveApp"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
