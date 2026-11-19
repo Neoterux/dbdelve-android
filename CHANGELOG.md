@@ -36,6 +36,8 @@ to its version and date.
 
 ### Changed
 
+- The notice of a newer version shows what's new in it, from the release's
+  own notes, instead of sending you to the browser.
 - Saved queries and Save this query share one bookmark menu under the editor,
   making room for History and Explain.
 - A running statement keeps running when you leave the app with Back or

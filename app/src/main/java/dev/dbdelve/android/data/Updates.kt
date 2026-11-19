@@ -12,10 +12,15 @@ import org.json.JSONObject
  * installing, so the app needs no permission to install packages.
  */
 object Updates {
+    private const val NOTES_CHARS = 20_000
+
     const val LATEST = "https://api.github.com/repos/Neoterux/dbdelve-android/releases/latest"
 
-    /** A published release: its version without the `v`, its page, its APK. */
-    data class Release(val version: String, val page: String, val apk: String?) {
+    /**
+     * A published release: its version without the `v`, its page, its APK,
+     * and its notes (the release's body, Markdown: the changelog's section).
+     */
+    data class Release(val version: String, val page: String, val apk: String?, val notes: String = "") {
         /** Where Download goes: the APK itself, or the page when it has none. */
         val download: String get() = apk ?: page
     }
@@ -61,7 +66,10 @@ object Updates {
         }
         val page = release.optString("html_url").takeIf { it.startsWith("https://") }
             ?: "https://github.com/Neoterux/dbdelve-android/releases/latest"
-        return Release(version, page, apk)
+        // The notes are shown as text, never as a page: no HTML, no links
+        // followed. Capped, since a release body has no length limit.
+        val notes = release.optString("body").replace("\r\n", "\n").trim().take(NOTES_CHARS)
+        return Release(version, page, apk, notes)
     }
 
     /**

@@ -293,6 +293,11 @@ fun ModeBadge(mode: Mode) {
 @Composable
 private fun UpdateBanner(model: AppViewModel, release: Updates.Release) {
     val uri = LocalUriHandler.current
+    var notesOpen by remember { mutableStateOf(false) }
+    val download = {
+        runCatching { uri.openUri(release.download) }
+            .onFailure { model.connectError = "No app on this phone opens web links." }
+    }
     Card(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
@@ -304,14 +309,29 @@ private fun UpdateBanner(model: AppViewModel, release: Updates.Release) {
                 fontSize = 13.sp,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
             )
+            // A taste of the notes, the first lines that say something.
+            noteBlocks(release.notes).firstOrNull { it !is NoteBlock.Heading }?.let { first ->
+                Text(
+                    when (first) {
+                        is NoteBlock.Bullet -> first.text
+                        is NoteBlock.Paragraph -> first.text
+                        is NoteBlock.Heading -> first.text
+                    },
+                    fontSize = 13.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.padding(top = 6.dp, end = 8.dp),
+                )
+            }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 TextButton(onClick = model::dismissUpdate) { Text("Later") }
-                TextButton(onClick = { runCatching { uri.openUri(release.page) } }) { Text("What's new") }
-                TextButton(onClick = {
-                    runCatching { uri.openUri(release.download) }
-                        .onFailure { model.connectError = "No app on this phone opens web links." }
-                }) { Text("Download") }
+                TextButton(onClick = { notesOpen = true }) { Text("What's new") }
+                TextButton(onClick = { download() }) { Text("Download") }
             }
         }
+    }
+    if (notesOpen) {
+        ReleaseNotesSheet(release, onDownload = { notesOpen = false; download() }) { notesOpen = false }
     }
 }

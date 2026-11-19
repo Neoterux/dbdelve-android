@@ -8,6 +8,7 @@ import android.view.WindowManager
 import androidx.compose.material3.Surface
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import dev.dbdelve.android.data.HistoryStore
 import dev.dbdelve.android.data.Profile
@@ -198,6 +199,37 @@ class ScreensTest {
         shot("13-explain")
         compose.runOnIdle { model.pane = Pane.QUERY }
         shot("14-editor-tools")
+    }
+
+    /** The notice of a newer release, with its notes from GitHub. Needs no database. */
+    @Test
+    fun updateNotice() {
+        assumeTrue("DBDELVE_SCREENS_PG is not set", System.getenv("DBDELVE_SCREENS_PG") != null)
+        val app = RuntimeEnvironment.getApplication()
+        val files = File(app.filesDir, "notice-${System.nanoTime()}").apply { mkdirs() }
+        val updates = UpdateStore(app).apply {
+            automatic = false
+            found = dev.dbdelve.android.data.Updates.Release(
+                "0.4.0",
+                "https://github.com/Neoterux/dbdelve-android/releases/tag/v0.4.0",
+                null,
+                "### Added\n\n- Explain, under the editor: the plan of the statement under the cursor,\n  or the plan with timings.\n- History for each connection: every statement sent, exactly as sent.\n- TLS with your own CA, and client certificates.\n\n### Changed\n\n- A running statement keeps running when you leave the app.",
+            )
+        }
+        val model = AppViewModel(
+            ProfileStore(files),
+            Secrets(app),
+            TabStore(File(files, "tabs")),
+            SavedQueryStore(files),
+            HistoryStore(File(files, "history")),
+            updates,
+            installedVersion = "0.3.0",
+            tlsDir = File(files, "tls"),
+        ) {}
+        compose.setContent { DBDelveTheme { Surface { ConnectionsScreen(model) } } }
+        shot("15-update")
+        compose.onNodeWithText("What's new").performClick()
+        shot("16-update-notes")
     }
 
     /**

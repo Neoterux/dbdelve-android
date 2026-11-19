@@ -21,7 +21,8 @@ app under **What's new**.
 
 The app asks GitHub for the latest release (at most twice a day, nothing sent
 but the request itself) and shows a notice with a download link when a newer
-one is out; turn this off under **Check automatically** in the menu. An APK
+one is out, with the start of its notes; **What's new** opens the release's
+notes in the app (as text: no page loads, no link is followed); turn this off under **Check automatically** in the menu. An APK
 updates the installed app only when both are signed with the same key.
 
 ## Screenshots
@@ -40,6 +41,10 @@ Drawn by `ScreensTest` from the app's own screens, connected to a Postgres
 | IN and an OR group | Count per group | Counted rows | History |
 |---|---|---|---|
 | ![An IN filter with two values, and a second group joined by OR](screenshots/builder-or.png) | ![Count rows, grouped by status, sorted by the count](screenshots/builder-count.png) | ![One row per status with its count](screenshots/count-results.png) | ![Statements as sent, newest first, each with its outcome and when](screenshots/history.png) |
+
+| Explain | A newer release |
+|---|---|
+| ![A Postgres plan with timings, as text](screenshots/explain.png) | ![The update notice and the release's notes](screenshots/update-notes.png) |
 
 ## Target
 

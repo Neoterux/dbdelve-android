@@ -51,6 +51,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -60,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.dbdelve.android.AppViewModel
 import dev.dbdelve.android.data.HistoryEntry
+import dev.dbdelve.android.data.Updates
 import dev.dbdelve.android.data.SavedQuery
 import uniffi.dbdelve_core.Binding
 import uniffi.dbdelve_core.ParamValue
@@ -320,22 +322,55 @@ fun RowSheet(result: ResultSet, index: Int, copy: (String) -> Unit, onDismiss: (
 @Composable
 fun ChangelogSheet(onDismiss: () -> Unit) {
     val context = LocalContext.current
-    val lines = remember {
-        runCatching { context.assets.open("CHANGELOG.md").bufferedReader().readLines() }.getOrDefault(listOf("No changelog in this build."))
+    val text = remember {
+        runCatching { context.assets.open("CHANGELOG.md").bufferedReader().readText() }.getOrDefault("No changelog in this build.")
     }
+    // From the first version heading: the file's own introduction is for editors.
+    val blocks = remember(text) { noteBlocks(text).dropWhile { !(it is NoteBlock.Heading && it.level == 2) } }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         SheetTitle("What's new")
-        LazyColumn(Modifier.heightIn(max = 600.dp).navigationBarsPadding().padding(horizontal = 24.dp)) {
-            items(lines.dropWhile { !it.startsWith("## ") }) { line ->
-                when {
-                    line.startsWith("## ") -> Text(line.removePrefix("## "), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
-                    line.startsWith("### ") -> Text(line.removePrefix("### "), style = MaterialTheme.typography.labelLarge, color = LocalPalette.current.orange, modifier = Modifier.padding(top = 8.dp))
-                    line.startsWith("- ") -> Text("• " + line.removePrefix("- ").replace("`", ""), fontSize = 14.sp, modifier = Modifier.padding(top = 2.dp))
-                    line.isBlank() -> Spacer(Modifier.size(4.dp))
-                    else -> Text(line.replace("`", ""), fontSize = 14.sp)
+        NoteList(blocks)
+    }
+}
+
+/** A newer release's own notes, from GitHub, and a link to its page. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ReleaseNotesSheet(release: Updates.Release, onDownload: () -> Unit, onDismiss: () -> Unit) {
+    val uri = LocalUriHandler.current
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        SheetTitle("What's new in ${release.version}")
+        val blocks = remember(release.notes) { noteBlocks(release.notes) }
+        if (blocks.isEmpty()) {
+            Text("This release has no notes.", color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 24.dp))
+        } else {
+            Box(Modifier.weight(1f, fill = false)) { NoteList(blocks) }
+        }
+        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp).navigationBarsPadding(), horizontalArrangement = Arrangement.End) {
+            TextButton(onClick = { runCatching { uri.openUri(release.page) } }) { Text("Open on GitHub") }
+            TextButton(onClick = onDownload) { Text("Download") }
+        }
+    }
+}
+
+@Composable
+private fun NoteList(blocks: List<NoteBlock>) {
+    LazyColumn(Modifier.heightIn(max = 600.dp).padding(horizontal = 24.dp)) {
+        items(blocks) { block ->
+            when (block) {
+                is NoteBlock.Heading -> if (block.level <= 2) {
+                    Text(block.text, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 16.dp))
+                } else {
+                    Text(block.text, style = MaterialTheme.typography.labelLarge, color = LocalPalette.current.orange, modifier = Modifier.padding(top = 10.dp))
                 }
+                is NoteBlock.Bullet -> Row(Modifier.padding(top = 4.dp)) {
+                    Text("•", fontSize = 14.sp, modifier = Modifier.padding(end = 8.dp))
+                    Text(block.text, fontSize = 14.sp)
+                }
+                is NoteBlock.Paragraph -> Text(block.text, fontSize = 14.sp, modifier = Modifier.padding(top = 6.dp))
             }
         }
+        item { Spacer(Modifier.size(16.dp)) }
     }
 }
 
