@@ -500,3 +500,71 @@ fn live_users_mongo() {
         },
     );
 }
+
+fn timed(session: &Session, text: &str, limit: u32) -> (dbdelve_core::ResultSet, Duration) {
+    let started = Instant::now();
+    let result = done(
+        session
+            .run(text.into(), limit, vec![], false, None)
+            .unwrap(),
+    );
+    (result, started.elapsed())
+}
+
+#[test]
+#[ignore]
+fn live_postgres_stops_at_the_limit() {
+    let Some(config) = config(
+        Engine::Postgres,
+        "DBDELVE_ANDROID_POSTGRES",
+        SslMode::Disable,
+    ) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    // Twenty million rows: drained, this takes many seconds.
+    let (result, took) = timed(&session, "SELECT g FROM generate_series(1, 20000000) g", 10);
+    assert_eq!(result.rows.len(), 10);
+    assert!(result.capped);
+    assert!(
+        took < Duration::from_secs(4),
+        "stopped, not drained: {took:?}"
+    );
+    done(run(&session, "SELECT 1"));
+
+    // Inside a transaction the user opened, a cancel would abort all of it:
+    // the read is drained instead, and the transaction carries on.
+    done(run(&session, "BEGIN"));
+    let (result, _) = timed(&session, "SELECT g FROM generate_series(1, 300000) g", 10);
+    assert!(result.capped);
+    let after = session.run("SELECT 1".into(), 10, vec![], false, None);
+    assert!(
+        matches!(after, Ok(RunOutcome::Done { .. })),
+        "still usable: {after:?}"
+    );
+    done(run(&session, "ROLLBACK"));
+}
+
+#[test]
+#[ignore]
+fn live_mysql_stops_at_the_limit() {
+    let Some(config) = config(Engine::MySql, "DBDELVE_ANDROID_MYSQL", SslMode::Disable) else {
+        return;
+    };
+    let session = Session::connect(config, Mode::ReadOnly).unwrap();
+    // A cross join of the catalog with itself, twice: millions of rows.
+    let (result, took) = timed(
+        &session,
+        "SELECT a.ORDINAL_POSITION FROM information_schema.COLUMNS a, \
+         information_schema.COLUMNS b, information_schema.COLUMNS c",
+        10,
+    );
+    assert_eq!(result.rows.len(), 10);
+    assert!(result.capped);
+    assert!(
+        took < Duration::from_secs(8),
+        "killed, not drained: {took:?}"
+    );
+    let after = done(run(&session, "SELECT 1"));
+    assert_eq!(after.rows, vec![vec![Some("1".into())]]);
+}

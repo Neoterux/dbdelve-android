@@ -113,6 +113,10 @@ They prove, on each engine, that:
 - On Postgres and MySQL, the server's own hold refuses a write the parser
   cannot read when it is run once in Read-only.
 - Cancel stops a 30-second sleep.
+- A read past the row limit is stopped, not drained: a twenty-million-row
+  Postgres read and a multi-million-row MySQL cross join both come back in
+  seconds. Inside a Postgres transaction you opened, the read is drained
+  instead, since a cancel would abort the transaction, and it stays usable.
 
 ## MySQL 5.6
 
@@ -127,6 +131,16 @@ They prove, on each engine, that:
 - No statement timeout is set: `max_execution_time` arrived in 5.7. Cancel
   sends `KILL QUERY` on a side connection.
 - Auth is `mysql_native_password`, 5.6's default.
+
+## The row limit
+
+The limit keeps that many rows of your statement as they arrive, and never
+changes the statement. A plain single read past the limit is then stopped,
+so a phone doesn't download a table only to throw it away: MySQL ends it
+with `KILL QUERY` from a side connection, and Postgres cancels it once a side
+connection sees, in `pg_stat_activity`, that this session runs exactly that
+statement as a transaction of its own. MongoDB drops the cursor. Anything that
+writes, takes a lock or sets a session variable is read to its end.
 
 ## MongoDB
 
@@ -186,8 +200,6 @@ Deliberate cuts, not oversights; those with a ceiling in the code are marked
 
 - **Row editing.** The grid is read-only. Desktop's generated `UPDATE` with its
   write gate is the next step.
-- **Stopping a capped read.** A read past the limit is drained to its end
-  instead of being cancelled at the limit; Cancel still stops it.
 - **Column types on Postgres.** The simple protocol sends every value as text
   and doesn't say its type.
 - **SSH tunnels.** Desktop shells out to the system `ssh`, which Android

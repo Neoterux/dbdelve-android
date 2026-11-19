@@ -5,6 +5,7 @@
 //! a runtime of its own, from the caller's thread: nothing that leaves this
 //! module is a future.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -79,10 +80,7 @@ enum Driver {
 }
 
 enum Canceller {
-    Postgres {
-        token: CancelToken,
-        tls: Option<MakeRustlsConnect>,
-    },
+    Postgres(Box<PostgresStop>),
     MySql {
         opts: mysql::Opts,
         id: u32,
@@ -448,7 +446,8 @@ impl Session {
     /// Stops the statement running now, from any thread.
     pub fn cancel(&self) {
         match &self.canceller {
-            Canceller::Postgres { token, tls } => {
+            Canceller::Postgres(stop) => {
+                let PostgresStop { token, tls, .. } = &**stop;
                 let Ok(runtime) = runtime() else { return };
                 // Best effort: a cancel that cannot reach the server leaves the
                 // statement to finish, which is what not cancelling does.
@@ -627,15 +626,24 @@ impl Session {
 
     fn send(&self, statement: &str, limit: usize) -> Result<ResultSet, CoreError> {
         let started = Instant::now();
+        let stoppable = gate::stoppable(self.engine, statement);
         let mut driver = self.driver.lock().unwrap();
-        let mut result = match &mut *driver {
-            Driver::Postgres { runtime, client } => {
-                runtime.block_on(run_postgres(client, statement, limit))?
+        let mut result = match (&mut *driver, &self.canceller) {
+            (Driver::Postgres { runtime, client }, Canceller::Postgres(stop)) => {
+                runtime.block_on(run_postgres(
+                    client,
+                    statement,
+                    limit,
+                    stoppable.then(|| (**stop).clone()),
+                ))?
             }
-            Driver::MySql(conn) => run_mysql(conn, statement, limit)?,
-            Driver::Mongo { runtime, database } => {
+            (Driver::MySql(conn), Canceller::MySql { opts, id }) => {
+                run_mysql(conn, statement, limit, stoppable.then_some((opts, *id)))?
+            }
+            (Driver::Mongo { runtime, database }, _) => {
                 runtime.block_on(run_mongo(database, statement, limit))?
             }
+            _ => unreachable!("a session's driver and canceller are made together"),
         };
         result.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(result)
@@ -685,20 +693,89 @@ fn connect_postgres(config: &ConnectionConfig) -> Result<(Driver, Canceller), Co
             (client, Some(tls))
         }
     };
-    let token = client.cancel_token();
+    let pid = runtime
+        .block_on(client.simple_query("SELECT pg_backend_pid()"))
+        .map_err(|error| connect_error(postgres_error(error)))?
+        .iter()
+        .find_map(|message| match message {
+            SimpleQueryMessage::Row(row) => row.get(0).and_then(|pid| pid.parse().ok()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            connect_error("The server did not say which process serves this session.")
+        })?;
+    let stop = PostgresStop {
+        token: client.cancel_token(),
+        tls,
+        config: pg,
+        pid,
+    };
     Ok((
         Driver::Postgres { runtime, client },
-        Canceller::Postgres { token, tls },
+        Canceller::Postgres(Box::new(stop)),
     ))
 }
 
-// ponytail: a read past the limit is drained to its end, where the desktop
-// cancels it once it can prove the cancel undoes nothing. Bounded by the
-// statement, not the limit; a cancel (`Session::cancel`) stops it.
+/// What stopping a Postgres read at the row limit needs: a side session to
+/// ask the server what this one is doing, and the token to cancel it.
+#[derive(Clone)]
+struct PostgresStop {
+    token: CancelToken,
+    tls: Option<MakeRustlsConnect>,
+    config: tokio_postgres::Config,
+    pid: i32,
+}
+
+impl PostgresStop {
+    /// Cancels `statement` only if a side session sees this session's
+    /// process running exactly it as a transaction of its own: a cancel
+    /// inside a transaction the user opened would abort all of it. Anything
+    /// it cannot confirm leaves the read to drain, which is only slower.
+    async fn stop_if_alone(self, statement: String, requested: Arc<AtomicBool>) {
+        let side = match &self.tls {
+            Some(tls) => self
+                .config
+                .connect(tls.clone())
+                .await
+                .map(|(client, connection)| {
+                    tokio::spawn(connection);
+                    client
+                }),
+            None => self
+                .config
+                .connect(tokio_postgres::NoTls)
+                .await
+                .map(|(client, connection)| {
+                    tokio::spawn(connection);
+                    client
+                }),
+        };
+        let Ok(side) = side else { return };
+        let alone = side
+            .query_opt(
+                "SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND state = 'active' \
+                 AND xact_start = query_start AND query = $2",
+                &[&self.pid, &statement],
+            )
+            .await;
+        if matches!(alone, Ok(Some(_))) {
+            requested.store(true, Ordering::SeqCst);
+            let _ = match &self.tls {
+                Some(tls) => self.token.cancel_query(tls.clone()).await,
+                None => self.token.cancel_query(tokio_postgres::NoTls).await,
+            };
+        }
+    }
+}
+
+/// Runs one statement and keeps `limit` rows. Past the limit a stoppable
+/// read is cancelled when [`PostgresStop`] can prove that undoes nothing,
+/// and drained otherwise.
 async fn run_postgres(
     client: &tokio_postgres::Client,
     statement: &str,
     limit: usize,
+    stop: Option<PostgresStop>,
 ) -> Result<ResultSet, CoreError> {
     let stream = client
         .simple_query_raw(statement)
@@ -706,11 +783,22 @@ async fn run_postgres(
         .map_err(|error| query_error(postgres_error(error)))?;
     pin_mut!(stream);
     let mut result = empty_result();
-    while let Some(message) = stream
-        .try_next()
-        .await
-        .map_err(|error| query_error(postgres_error(error)))?
-    {
+    let mut stop = stop;
+    let requested = Arc::new(AtomicBool::new(false));
+    loop {
+        let message = match stream.try_next().await {
+            Ok(Some(message)) => message,
+            Ok(None) => break,
+            // The cancel asked for at the limit: the rows kept are the result.
+            Err(error)
+                if requested.load(Ordering::SeqCst)
+                    && error.code() == Some(&tokio_postgres::error::SqlState::QUERY_CANCELED) =>
+            {
+                result.capped = true;
+                break;
+            }
+            Err(error) => return Err(query_error(postgres_error(error))),
+        };
         match message {
             SimpleQueryMessage::RowDescription(columns) => {
                 // The simple protocol names columns and sends every value as
@@ -733,6 +821,17 @@ async fn run_postgres(
                     );
                 } else {
                     result.capped = true;
+                    if let Some(stop) = stop.take() {
+                        // A thread of its own: rows already buffered never
+                        // yield this runtime, so a task here would wait for
+                        // the very drain it is meant to cut short.
+                        let (statement, requested) = (statement.to_owned(), requested.clone());
+                        std::thread::spawn(move || {
+                            if let Ok(runtime) = runtime() {
+                                runtime.block_on(stop.stop_if_alone(statement, requested));
+                            }
+                        });
+                    }
                 }
             }
             SimpleQueryMessage::CommandComplete(count) => result.affected = Some(count),
@@ -761,12 +860,14 @@ fn connect_mysql(config: &ConnectionConfig) -> Result<(Driver, Canceller), CoreE
     Ok((Driver::MySql(conn), Canceller::MySql { opts, id }))
 }
 
-// ponytail: as on Postgres, a read past the limit is drained rather than
-// killed; the desktop's `KILL QUERY` at the limit is the upgrade path.
+/// Runs one statement and keeps `limit` rows. Past the limit a stoppable
+/// read is ended with `KILL QUERY` from a side session, which stops the
+/// statement and never a transaction; otherwise it is drained.
 fn run_mysql(
     conn: &mut mysql::Conn,
     statement: &str,
     limit: usize,
+    stop: Option<(&mysql::Opts, u32)>,
 ) -> Result<ResultSet, CoreError> {
     let mut rows = conn.query_iter(statement).map_err(query_error)?;
     let mut result = empty_result();
@@ -785,15 +886,31 @@ fn run_mysql(
             .collect();
         result.rows.clear();
         result.capped = false;
+        let mut killed = false;
         for row in set {
-            let row = row.map_err(query_error)?;
+            let row = match row {
+                Ok(row) => row,
+                // ER_QUERY_INTERRUPTED: the kill asked for at the limit.
+                Err(mysql::Error::MySqlError(error)) if killed && error.code == 1317 => break,
+                Err(error) => return Err(query_error(error)),
+            };
             if result.rows.len() < limit {
                 result
                     .rows
                     .push(row.unwrap().into_iter().map(mysql_text).collect());
             } else {
                 result.capped = true;
+                if let (Some((opts, id)), false) = (stop, killed) {
+                    // A side session: this one is busy reading. If it cannot
+                    // connect, the rest is drained, which is only slower.
+                    if let Ok(mut side) = mysql::Conn::new(opts.clone()) {
+                        killed = side.query_drop(format!("KILL QUERY {id}")).is_ok();
+                    }
+                }
             }
+        }
+        if killed {
+            return Ok(result);
         }
     }
     result.affected = Some(rows.affected_rows());
