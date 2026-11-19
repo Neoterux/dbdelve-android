@@ -51,6 +51,12 @@ jobs:
           workspaces: core
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
+      # Known vulnerabilities in the dependency tree fail the build;
+      # unmaintained or unsound crates are reported without failing it.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
       - name: Tests, live ones included
         env:
           DBDELVE_ANDROID_MYSQL: 127.0.0.1:53356:root:pw:dev
@@ -101,6 +107,16 @@ jobs:
         run: |
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           ./gradlew --no-daemon :app:assembleRelease
+      # Android Lint: the SDK's own static analysis, including Compose's
+      # checks. Errors fail the build; the full report is kept either way.
+      - name: Android Lint
+        run: ./gradlew --no-daemon :app:lintRelease
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-report-${{ github.sha }}
+          path: app/build/reports/lint-results-release.*
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           name: dbdelve-android-${{ github.sha }}
