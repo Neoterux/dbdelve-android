@@ -404,6 +404,46 @@ fn calls_verdict(dialect: &dyn Dialect, sql: &str) -> Verdict {
     Verdict::READ
 }
 
+/// Whether a read may be stopped once it passes the row limit, instead of
+/// being drained to its end: one plain query that writes nothing and leaves
+/// nothing behind in the session, so stopping it undoes nothing. Locks and
+/// session variables are what a query can leave behind: an advisory or named
+/// lock, `set_config`, or a MySQL `@x :=`.
+pub fn stoppable(engine: Engine, sql: &str) -> bool {
+    let dialect: Box<dyn Dialect> = match engine {
+        Engine::Postgres => Box::new(PostgreSqlDialect {}),
+        Engine::MySql => Box::new(MySqlDialect {}),
+        // A MongoDB read stops by dropping its cursor, whatever it is.
+        Engine::Mongo => return false,
+    };
+    if classify(engine, sql) != Verdict::READ {
+        return false;
+    }
+    match Parser::parse_sql(dialect.as_ref(), sql) {
+        Ok(statements) if matches!(statements.as_slice(), [Statement::Query(_)]) => {}
+        _ => return false,
+    }
+    let Ok(tokens) = Tokenizer::new(dialect.as_ref(), sql).tokenize() else {
+        return false;
+    };
+    let tokens: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    !tokens.iter().enumerate().any(|(at, token)| match token {
+        Token::Assignment => true,
+        Token::Word(word) if tokens.get(at + 1) == Some(&&Token::LParen) => {
+            let name = word.value.to_ascii_lowercase();
+            name.contains("advisory")
+                || matches!(
+                    name.as_str(),
+                    "get_lock" | "release_lock" | "release_all_locks" | "set_config"
+                )
+        }
+        _ => false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,6 +517,26 @@ mod tests {
             verdict(Engine::Postgres, "GRANT SELECT ON t TO u"),
             Verdict::FULL
         );
+    }
+
+    #[test]
+    fn only_plain_reads_are_stoppable() {
+        assert!(stoppable(Engine::Postgres, "SELECT * FROM t"));
+        assert!(stoppable(Engine::MySql, "SELECT a FROM t WHERE b = ':='"));
+        assert!(!stoppable(Engine::Postgres, "SELECT 1; SELECT 2"));
+        assert!(!stoppable(Engine::Postgres, "SELECT pg_advisory_lock(1)"));
+        assert!(!stoppable(Engine::MySql, "SELECT GET_LOCK('a', 1)"));
+        assert!(!stoppable(Engine::MySql, "SELECT @x := 1"));
+        assert!(!stoppable(
+            Engine::Postgres,
+            "SELECT set_config('a', 'b', false)"
+        ));
+        assert!(!stoppable(
+            Engine::Postgres,
+            "UPDATE t SET a = 1 WHERE b = 2 RETURNING *"
+        ));
+        assert!(!stoppable(Engine::Postgres, "SHOW ALL"));
+        assert!(!stoppable(Engine::Postgres, "SELEC 1"));
     }
 
     #[test]
