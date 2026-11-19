@@ -98,9 +98,14 @@ in release mode, with debug info stripped from the packaged library.
 ## Installing CI builds
 
 Every push to `main` builds a release APK; open the run under **Actions** and
-download the artifact. A tag starting with `v` (`git tag v0.1.0 && git push
---tags`) also publishes it as a GitHub Release anyone can download. Move the
-changelog's *Unreleased* entries under the new version first.
+download the artifact.
+
+**To publish a release** anyone can download: move the changelog's
+*Unreleased* entries under a new `## <version> (<date>)` heading and push,
+then open **Actions → build → Run workflow** and enter the version (e.g.
+`0.2.0`). The run builds the APK, creates the tag `v0.2.0` on that commit and
+publishes `dbdelve-android-0.2.0.apk` with that changelog section as its notes.
+Pushing a `v*` tag does the same.
 
 **Sign with your own key, once,** or each CI build is signed with a
 throwaway key, and Android refuses to install it over the previous one
