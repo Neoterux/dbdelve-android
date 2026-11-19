@@ -11,8 +11,12 @@ import androidx.lifecycle.viewModelScope
 import dev.dbdelve.android.data.Profile
 import dev.dbdelve.android.data.ProfileStore
 import dev.dbdelve.android.data.Secrets
+import dev.dbdelve.android.data.ConnectionBundle
 import dev.dbdelve.android.data.SavedQuery
-import dev.dbdelve.android.data.SavedQueryStore
+import dev.dbdelve.android.data.SharedConnection
+import dev.dbdelve.android.data.ConnectionBundle
+import dev.dbdelve.android.data.SavedQuery
+import dev.dbdelve.android.data.SharedConnectionStore
 import dev.dbdelve.android.data.TabStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -34,6 +38,8 @@ import uniffi.dbdelve_core.Stop
 import uniffi.dbdelve_core.UserAction
 import uniffi.dbdelve_core.Verdict
 import uniffi.dbdelve_core.fillParameters
+import uniffi.dbdelve_core.openConnections
+import uniffi.dbdelve_core.sealConnections
 import uniffi.dbdelve_core.statementAt
 
 class QueryTab(val id: Long, title: String, text: String) {
@@ -141,6 +147,56 @@ class AppViewModel(
         allSaved = allSaved.filterNot { it.profileId == profile.id }
         savedStore.save(allSaved)
     }
+
+    /**
+     * The chosen connections sealed into a file under [passphrase]; with their
+     * passwords only when asked. Slow on purpose (the key derivation), so off
+     * the main thread.
+     */
+    suspend fun exportConnections(chosen: List<Profile>, withPasswords: Boolean, passphrase: String): Result<ByteArray> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val shared = chosen.map { SharedConnection(it, if (withPasswords) password(it) else null) }
+                sealConnections(ConnectionBundle.toJson(shared), passphrase)
+            }
+        }
+
+    /** Opens a shared file: a wrong passphrase or a changed byte fails here. */
+    suspend fun openConnectionsFile(file: ByteArray, passphrase: String): Result<List<SharedConnection>> =
+        withContext(Dispatchers.IO) {
+            runCatching { ConnectionBundle.fromJson(openConnections(file, passphrase)) }
+                .recoverCatching { throw IllegalStateException(it.reason()) }
+        }
+
+    enum class Clash { KEEP_BOTH, REPLACE, SKIP }
+
+    /**
+     * Saves what the import dialog settled on. A name already here is kept
+     * beside it, replaced in place (its id, tabs and saved queries kept), or
+     * skipped, as chosen per connection.
+     */
+    fun importConnections(chosen: List<Pair<SharedConnection, Clash>>): Int {
+        var imported = 0
+        var next = profiles
+        chosen.forEach { (shared, clash) ->
+            val existing = next.find { it.name == shared.profile.name }
+            val profile = when {
+                existing == null -> shared.profile
+                clash == Clash.SKIP -> return@forEach
+                clash == Clash.REPLACE -> shared.profile.copy(id = existing.id)
+                else -> shared.profile.copy(name = uniqueName(shared.profile.name, next))
+            }
+            shared.password?.let { secrets.setPassword(profile.id, it) }
+            next = next.filterNot { it.id == profile.id } + profile
+            imported++
+        }
+        profiles = next.sortedWith(compareBy({ it.project }, { it.name }))
+        store.save(profiles)
+        return imported
+    }
+
+    private fun uniqueName(name: String, taken: List<Profile>): String =
+        generateSequence(2) { it + 1 }.map { "$name ($it)" }.first { candidate -> taken.none { it.name == candidate } }
 
     private var allSaved by mutableStateOf(savedStore.load())
 

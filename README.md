@@ -234,6 +234,23 @@ into the statement, and the filled statement passes the same gate as anything
 typed. A `:name` inside a string, a comment or a Postgres `::cast` is not a
 parameter. On MongoDB, `db.orders.find({status: :status})` works the same way.
 
+## Sharing connections
+
+**⋮ → Share connections** seals the chosen connections, with or without their
+passwords, into a `.dbdelve` file and hands it to the share sheet: a chat,
+mail, a drive, or Files. It is encrypted with AES-256-GCM under a key drawn
+from your passphrase (PBKDF2-HMAC-SHA256, 600,000 iterations, a fresh salt per
+file), and the whole file is authenticated: a wrong passphrase or one changed
+byte fails to open rather than opening as something else. Send the passphrase
+another way than the file.
+
+**⋮ → Import connections** opens such a file with Android's file picker. After
+the passphrase, every connection in it is shown for review before anything is
+saved: change its name, host, port, user, database, project, TLS and mode;
+keep its password or not; and where a connection of that name is already
+here, keep both, replace it, or skip it. Imported connections start Read-only,
+like any new one, whatever mode they had where they came from.
+
 ## Users and roles
 
 The **Users** tab lists the server's accounts: Postgres roles, MySQL
