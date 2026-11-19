@@ -1,5 +1,6 @@
 package dev.dbdelve.android
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -14,7 +15,9 @@ import androidx.fragment.app.FragmentActivity
 import dev.dbdelve.android.ui.ConnectionForm
 import dev.dbdelve.android.ui.ConnectionsScreen
 import dev.dbdelve.android.ui.DBDelveTheme
+import dev.dbdelve.android.ui.UpdateNotes
 import dev.dbdelve.android.ui.WorkspaceScreen
+import dev.dbdelve.android.update.Updater
 
 // A FragmentActivity because BiometricPrompt needs one.
 class MainActivity : FragmentActivity() {
@@ -26,6 +29,7 @@ class MainActivity : FragmentActivity() {
         model.screenShown()
         // Throttled and off when the user turned it off: see checkForUpdates.
         model.checkForUpdates(manual = false)
+        showUpdateFrom(intent)
         setContent {
             DBDelveTheme {
                 Surface {
@@ -37,9 +41,30 @@ class MainActivity : FragmentActivity() {
                         }
                         Screen.Workspace -> WorkspaceScreen(model, ::authenticate)
                     }
+                    // The Connections screen shows the notes itself, under its notice.
+                    if (model.screen != Screen.Connections) UpdateNotes(model)
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        showUpdateFrom(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        model.refreshUpdate()
+    }
+
+    /** Opened from "version X is available": straight to its notes. */
+    private fun showUpdateFrom(intent: Intent?) {
+        if (intent?.getBooleanExtra(Updater.EXTRA_SHOW_UPDATE, false) != true) return
+        intent.removeExtra(Updater.EXTRA_SHOW_UPDATE)
+        model.refreshUpdate()
+        model.showUpdateNotes = model.update != null
     }
 
     override fun onDestroy() {

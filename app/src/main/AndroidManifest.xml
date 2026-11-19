@@ -1,10 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.USE_BIOMETRIC" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- The updater: notices of a new version and a download's progress
+         (asked for at the first Download, from Android 13), and handing the
+         downloaded APK to Android's installer, which asks the user before it
+         installs anything. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- No backup: passwords are sealed by a Keystore key that never leaves
          this device, so a restored copy could not open them anyway. -->
@@ -27,7 +34,8 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <!-- Shared CSVs, written to the cache and lent to the app chosen. -->
+        <!-- Shared CSVs, written to the cache and lent to the app chosen; and
+             a downloaded update, lent to Android's installer. -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.files"
@@ -41,5 +49,15 @@
             android:name=".QueryService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- WorkManager's own service, which runs the update download in the
+             foreground: Android 14 wants its type declared. -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
+        <!-- The update notifications' Download and Cancel. -->
+        <receiver
+            android:name=".update.UpdateActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>

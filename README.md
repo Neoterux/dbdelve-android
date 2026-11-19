@@ -19,11 +19,20 @@ when Android asks). It needs a 64-bit ARM phone on Android 12 or later.
 What changed in each version is in [CHANGELOG.md](CHANGELOG.md), and in the
 app under **What's new**.
 
-The app asks GitHub for the latest release (at most twice a day, nothing sent
-but the request itself) and shows a notice with a download link when a newer
-one is out, with the start of its notes; **What's new** opens the release's
-notes in the app (as text: no page loads, no link is followed); turn this off under **Check automatically** in the menu. An APK
-updates the installed app only when both are signed with the same key.
+The app updates itself, the way Mihon does. It asks GitHub for the latest
+release on launch (at most twice a day) and once a day in the background,
+sending nothing but the request itself, and shows a notice (and, with the app
+closed, a notification) when a newer one is out, with the start of its notes;
+**What's new** opens the release's notes in the app (as text: no page loads,
+no link is followed). **Download** fetches the APK inside the app, with its
+progress in the notice and a notification; the app then checks it (the
+SHA-256 GitHub published for it, that it is DBDelve, newer, and signed with
+the same key as the installed app) and **Install** hands it to Android's
+installer, which asks before replacing anything. The first Download asks for
+the notification permission (refusing it only hides the notifications) and
+the first Install for permission to install apps from DBDelve. Turn the
+checks off under **Check automatically** in the menu. An APK updates the
+installed app only when both are signed with the same key.
 
 ## Screenshots
 

@@ -43,4 +43,26 @@ class UpdatesTest {
             noteBlocks("See the [README](https://example.com) for `setup`."),
         )
     }
+
+    @Test
+    fun the_apk_digest_is_read_when_github_gives_one() {
+        val hex = "ab".repeat(32)
+        val release = Updates.parse(
+            """{"tag_name": "v0.6.0", "html_url": "https://github.com/x/y",
+               "assets": [{"name": "dbdelve-android-0.6.0.apk",
+                           "browser_download_url": "https://github.com/x/y/releases/download/v0.6.0/a.apk",
+                           "digest": "sha256:${hex.uppercase()}"}]}""",
+        )!!
+        assertEquals("https://github.com/x/y/releases/download/v0.6.0/a.apk", release.apk)
+        assertEquals(hex, release.sha256)
+    }
+
+    @Test
+    fun a_digest_that_is_not_sha256_is_ignored() {
+        val release = Updates.parse(
+            """{"tag_name": "v0.6.0", "html_url": "https://github.com/x/y",
+               "assets": [{"name": "a.apk", "browser_download_url": "https://x/a.apk", "digest": "md5:abc"}]}""",
+        )!!
+        assertEquals(null, release.sha256)
+    }
 }

@@ -289,6 +289,17 @@ class ScreensTest {
         shot("15-update")
         compose.onNodeWithText("What's new").performClick()
         shot("16-update-notes")
+        // The download, as the updater reports it, then the APK checked and ready.
+        compose.runOnIdle {
+            model.showUpdateNotes = false
+            dev.dbdelve.android.update.Updater.report(dev.dbdelve.android.update.Updater.Download.Running("0.4.0", 0.42f))
+        }
+        shot("17-update-downloading")
+        compose.runOnIdle {
+            dev.dbdelve.android.update.Updater.report(dev.dbdelve.android.update.Updater.Download.Ready("0.4.0", File(files, "x.apk")))
+        }
+        shot("18-update-ready")
+        dev.dbdelve.android.update.Updater.report(dev.dbdelve.android.update.Updater.Download.Idle)
     }
 
     /**

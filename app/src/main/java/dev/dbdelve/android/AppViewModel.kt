@@ -20,6 +20,7 @@ import dev.dbdelve.android.data.SharedConnection
 import dev.dbdelve.android.data.TabStore
 import dev.dbdelve.android.data.UpdateStore
 import dev.dbdelve.android.data.Updates
+import dev.dbdelve.android.update.Updater
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -930,6 +931,8 @@ class AppViewModel(
         private set
     var automaticUpdates by mutableStateOf(updates.automatic)
         private set
+    /** The release's notes are open: from What's new, or a notification. */
+    var showUpdateNotes by mutableStateOf(false)
 
     private fun worthShowing(release: Updates.Release) =
         Updates.isNewer(release.version, installedVersion) && release.version != updates.dismissed
@@ -937,11 +940,18 @@ class AppViewModel(
     fun changeAutomaticUpdates(on: Boolean) {
         updates.automatic = on
         automaticUpdates = on
+        Updater.schedule(on)
         if (on) checkForUpdates(manual = false)
     }
 
+    /** Picks up what the background check found while the app was away. */
+    fun refreshUpdate() {
+        if (!checkingUpdates) update = updates.found?.takeIf(::worthShowing)
+    }
+
     /**
-     * Asks GitHub for the latest release. By itself (on launch) at most once
+     * Asks GitHub for the latest release. By itself (on launch, and daily in
+     * the background through [Updater]) at most once
      * every [UPDATE_INTERVAL], silently, and not at all when turned off; on
      * request, always, and says what it found, including nothing.
      */
@@ -970,6 +980,7 @@ class AppViewModel(
     fun dismissUpdate() {
         update?.let { updates.dismissed = it.version }
         update = null
+        showUpdateNotes = false
     }
 
     /** Set when the screen went for good mid-statement: disconnect once it ends. */
