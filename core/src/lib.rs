@@ -9,11 +9,13 @@ uniffi::setup_scaffolding!();
 
 pub mod gate;
 pub mod mongo_cmd;
+pub mod params;
 mod session;
 pub mod split;
 pub mod users;
 
 pub use gate::{Destructive, Mode, Stop, Verdict};
+pub use params::{Binding, ParamValue};
 pub use session::{CatalogEntry, Column, ObjectKind, ResultSet, RunOutcome, Session};
 pub use split::Span;
 pub use users::{Account, DbUser, Prepared, RoleRef, Scope, ScopeKind, UserAbilities, UserAction};
@@ -85,4 +87,21 @@ pub fn default_port(engine: Engine) -> u16 {
 #[uniffi::export]
 pub fn user_abilities(engine: Engine) -> UserAbilities {
     users::abilities(engine)
+}
+
+/// The `:name` parameters a saved query asks for, each once, in order.
+#[uniffi::export]
+pub fn parameters(engine: Engine, text: String) -> Vec<String> {
+    params::parameters(engine, &text)
+}
+
+/// The query with each `:name` replaced by its value as a literal, to be
+/// shown and then run like any typed statement.
+#[uniffi::export]
+pub fn fill_parameters(
+    engine: Engine,
+    text: String,
+    bindings: Vec<Binding>,
+) -> Result<String, CoreError> {
+    params::fill(engine, &text, &bindings)
 }

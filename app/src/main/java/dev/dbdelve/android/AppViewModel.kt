@@ -11,6 +11,8 @@ import androidx.lifecycle.viewModelScope
 import dev.dbdelve.android.data.Profile
 import dev.dbdelve.android.data.ProfileStore
 import dev.dbdelve.android.data.Secrets
+import dev.dbdelve.android.data.SavedQuery
+import dev.dbdelve.android.data.SavedQueryStore
 import dev.dbdelve.android.data.TabStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,6 +20,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.dbdelve_core.Account
+import uniffi.dbdelve_core.Binding
 import uniffi.dbdelve_core.CatalogEntry
 import uniffi.dbdelve_core.CoreException
 import uniffi.dbdelve_core.Destructive
@@ -30,6 +33,7 @@ import uniffi.dbdelve_core.Session
 import uniffi.dbdelve_core.Stop
 import uniffi.dbdelve_core.UserAction
 import uniffi.dbdelve_core.Verdict
+import uniffi.dbdelve_core.fillParameters
 import uniffi.dbdelve_core.statementAt
 
 class QueryTab(val id: Long, title: String, text: String) {
@@ -75,6 +79,7 @@ class AppViewModel(
     private val store: ProfileStore,
     private val secrets: Secrets,
     private val tabStore: TabStore,
+    private val savedStore: SavedQueryStore,
     /** Called with the connection's name while a statement runs, null after. */
     private val keepAlive: (connection: String?) -> Unit,
 ) : ViewModel() {
@@ -133,6 +138,49 @@ class AppViewModel(
         store.save(profiles)
         secrets.forget(profile.id)
         tabStore.forget(profile.id)
+        allSaved = allSaved.filterNot { it.profileId == profile.id }
+        savedStore.save(allSaved)
+    }
+
+    private var allSaved by mutableStateOf(savedStore.load())
+
+    /** The open connection's saved queries, by name. */
+    val saved: List<SavedQuery>
+        get() = profile?.let { open -> allSaved.filter { it.profileId == open.id }.sortedBy { it.name.lowercase() } }.orEmpty()
+
+    /** Saves [text] as [name] for this connection, replacing one of that name. */
+    fun saveQuery(name: String, text: String) {
+        val profileId = profile?.id ?: return
+        val kept = allSaved.filterNot { it.profileId == profileId && it.name == name }
+        allSaved = kept + SavedQuery(SavedQueryStore.newId(), profileId, name, text)
+        savedStore.save(allSaved)
+        tab?.title = name
+        saveTabs()
+    }
+
+    fun deleteSaved(query: SavedQuery) {
+        allSaved = allSaved.filterNot { it.id == query.id }
+        savedStore.save(allSaved)
+    }
+
+    /** Opens a saved query in a tab of its own, as saved, to edit or run. */
+    fun openSaved(query: SavedQuery) {
+        newTab(query.name, query.text)
+        pane = Pane.QUERY
+    }
+
+    /**
+     * Fills a saved query's parameters and runs it, in a tab that shows the
+     * filled statement: what ran is on screen, and runs through the gate like
+     * anything typed. Returns why it could not be filled, or null.
+     */
+    fun runSaved(query: SavedQuery, bindings: List<Binding>): String? {
+        val session = session ?: return "Not connected."
+        val filled = runCatching { fillParameters(session.engine(), query.text, bindings) }
+            .getOrElse { return it.reason() }
+        val tab = newTab(query.name, filled)
+        execute(tab, filled, emptyList(), runOnce = false, onceIn = null)
+        return null
     }
 
     fun connect(profile: Profile) {
@@ -345,10 +393,15 @@ class AppViewModel(
     /** What the last user-management statement did, or why it failed. */
     var userMessage by mutableStateOf<String?>(null)
 
+    var refreshingUsers by mutableStateOf(false)
+        private set
+
     fun refreshUsers() {
         val session = session ?: return
+        refreshingUsers = true
         viewModelScope.launch {
             val listed = withContext(Dispatchers.IO) { runCatching { session.users() } }
+            refreshingUsers = false
             listed.onSuccess {
                 users = it
                 usersError = null
@@ -435,10 +488,15 @@ class AppViewModel(
         Thread { runCatching { session.cancel() } }.start()
     }
 
+    var refreshingCatalog by mutableStateOf(false)
+        private set
+
     fun refreshCatalog() {
         val session = session ?: return
+        refreshingCatalog = true
         viewModelScope.launch {
             val listed = withContext(Dispatchers.IO) { runCatching { session.catalog() } }
+            refreshingCatalog = false
             listed.onSuccess {
                 catalog = it
                 catalogError = null

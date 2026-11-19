@@ -20,8 +20,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.Icon
@@ -52,8 +55,15 @@ import uniffi.dbdelve_core.Mode
 @Composable
 fun ConnectionsScreen(model: AppViewModel) {
     var filter by remember { mutableStateOf("") }
+    var changelog by remember { mutableStateOf(false) }
+    if (changelog) ChangelogSheet { changelog = false }
     Scaffold(
-        topBar = { TopAppBar(title = { Text("DBDelve", fontWeight = FontWeight.Bold) }) },
+        topBar = {
+            TopAppBar(
+                title = { Text("DBDelve", fontWeight = FontWeight.Bold) },
+                actions = { TextButton(onClick = { changelog = true }) { Text("What's new") } },
+            )
+        },
         floatingActionButton = {
             ExtendedFloatingActionButton(
                 onClick = { model.screen = Screen.Edit(null) },
@@ -116,16 +126,24 @@ fun SectionHeader(title: String, count: Int? = null) {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun ProfileRow(profile: Profile, connecting: Boolean, model: AppViewModel) {
     val palette = LocalPalette.current
     var menu by remember { mutableStateOf(false) }
+    var removing by remember { mutableStateOf(false) }
+    val haptics = LocalHapticFeedback.current
     Box {
         Row(
             Modifier
                 .fillMaxWidth()
-                .combinedClickable(onClick = { model.connect(profile) }, onLongClick = { menu = true })
+                .combinedClickable(
+                    onClick = { model.connect(profile) },
+                    onLongClick = {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        menu = true
+                    },
+                )
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -155,11 +173,26 @@ private fun ProfileRow(profile: Profile, connecting: Boolean, model: AppViewMode
             }
             ModeBadge(profile.mode)
         }
-        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-            DropdownMenuItem(text = { Text("Edit") }, onClick = { menu = false; model.screen = Screen.Edit(profile) })
-            DropdownMenuItem(text = { Text("Duplicate") }, onClick = { menu = false; model.screen = Screen.Edit(profile, duplicate = true) })
-            DropdownMenuItem(text = { Text("Remove ${profile.name}") }, onClick = { menu = false; model.deleteProfile(profile) })
+    }
+    if (menu) {
+        ModalBottomSheet(onDismissRequest = { menu = false }) {
+            SheetTitle(profile.name, "${profile.host}:${profile.port}")
+            Column(Modifier.navigationBarsPadding()) {
+                SheetAction("Connect") { menu = false; model.connect(profile) }
+                SheetAction("Edit") { menu = false; model.screen = Screen.Edit(profile) }
+                SheetAction("Duplicate", detail = "Keeps its mode") { menu = false; model.screen = Screen.Edit(profile, duplicate = true) }
+                SheetAction("Remove", color = LocalPalette.current.red) { menu = false; removing = true }
+            }
         }
+    }
+    if (removing) {
+        AlertDialog(
+            onDismissRequest = { removing = false },
+            title = { Text("Remove ${profile.name}?") },
+            text = { Text("Its saved password, query tabs and saved queries go with it. Nothing on the server changes.") },
+            confirmButton = { TextButton(onClick = { removing = false; model.deleteProfile(profile) }) { Text("Remove") } },
+            dismissButton = { TextButton(onClick = { removing = false }) { Text("Cancel") } },
+        )
     }
 }
 
