@@ -1,0 +1,98 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The Rust core on its own: format, lint, unit tests, and the live tests
+  # against the three servers the app speaks, MySQL at 5.6.
+  core:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:5.6
+        env:
+          MYSQL_ROOT_PASSWORD: pw
+          MYSQL_DATABASE: dev
+        ports: ["53356:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -ppw"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: dev
+        ports: ["55416:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      mongo:
+        image: mongo:7
+        ports: ["57007:27017"]
+    defaults:
+      run:
+        working-directory: core
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Tests, live ones included
+        env:
+          DBDELVE_ANDROID_MYSQL: 127.0.0.1:53356:root:pw:dev
+          DBDELVE_ANDROID_POSTGRES: 127.0.0.1:55416:postgres:pw:dev
+          DBDELVE_ANDROID_MONGO: "127.0.0.1:57007:::dev"
+        run: cargo test --locked -- --include-ignored
+
+  # The APK: the core cross-compiled for arm64 by cargo-ndk, the Kotlin
+  # bindings generated from it, and the Compose app around them.
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+          key: android
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --version 3.5.4 --locked
+      - name: Build
+        # The runner image ships the Android SDK and NDKs; point cargo-ndk at
+        # the newest.
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          ./gradlew --no-daemon :app:assembleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbdelve-android-${{ github.sha }}
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+      # A tag publishes the APK on the repository's Releases page.
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/*.apk
+    permissions:
+      contents: write
