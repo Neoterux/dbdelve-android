@@ -9,6 +9,16 @@ built on the same rules as the desktop app: your statement runs exactly as
 typed, every statement passes the connection's mode first, and a connection
 starts Read-only.
 
+## Download
+
+Get the latest APK from the
+[Releases page](https://github.com/Neoterux/dbdelve-android/releases/latest)
+and open it on the phone (allow installing from your browser or file manager
+when Android asks). It needs a 64-bit ARM phone on Android 15.
+
+What changed in each version is in [CHANGELOG.md](CHANGELOG.md), and in the
+app under **What's new**.
+
 ## Target
 
 64-bit ARM phones on Android 15.
@@ -77,11 +87,20 @@ To install on the phone, turn on *Developer options → USB debugging* (tap
 generates the Kotlin bindings from the built library itself, so they always
 describe the core that is packaged.
 
+## Release builds
+
+Release APKs are built by R8: shrunk, optimised and obfuscated, with resources
+shrunk, logging removed and nothing debuggable. `app/proguard-rules.pro` keeps
+only what R8 cannot see being used: JNA, which reaches the Rust core by
+reflection, and the generated bindings it maps by name. The Rust core is built
+in release mode, with debug info stripped from the packaged library.
+
 ## Installing CI builds
 
 Every push to `main` builds a release APK; open the run under **Actions** and
 download the artifact. A tag starting with `v` (`git tag v0.1.0 && git push
---tags`) also attaches it to a GitHub Release.
+--tags`) also publishes it as a GitHub Release anyone can download. Move the
+changelog's *Unreleased* entries under the new version first.
 
 **Sign with your own key, once,** or each CI build is signed with a
 throwaway key, and Android refuses to install it over the previous one
@@ -197,6 +216,23 @@ one would run a different command from the one typed.
 
 MongoDB has no server-side read-only hold, so in Read-only the gate is the only
 thing that stops a write. Use a read-only role for anything that matters.
+
+## Saved queries and parameters
+
+Save the tab you are writing (**Save** under the editor) and it is kept for
+that connection; the star opens the list. Write `:name` wherever a value
+goes:
+
+```sql
+SELECT * FROM orders WHERE customer_id = :customer AND created_at > :since
+```
+
+Running it asks for each parameter as text, a number or NULL, shows the
+statement it becomes, and runs that in a tab of its own. A value goes in as a
+literal (a string quoted, a number checked to be one), never as text spliced
+into the statement, and the filled statement passes the same gate as anything
+typed. A `:name` inside a string, a comment or a Postgres `::cast` is not a
+parameter. On MongoDB, `db.orders.find({status: :status})` works the same way.
 
 ## Users and roles
 
