@@ -91,18 +91,28 @@ jobs:
           key: android
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --version 3.5.4 --locked
-      # The release key, when the repository has one in its secrets. Without
-      # it the APK is signed with this runner's throwaway debug key.
+      # The release key. A pull request may build with this runner's throwaway
+      # debug key (a fork's pull request gets no secrets); anything else, a
+      # push to main, a tag or a published release, stops here without it:
+      # 0.1.0 went out debug-signed when this was only a warning, and an APK
+      # signed with another key cannot update the installed app.
       - name: Signing key
         env:
           KEYSTORE: ${{ secrets.DBDELVE_SIGNING_KEYSTORE_BASE64 }}
+          EVENT: ${{ github.event_name }}
         run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "DBDELVE_REQUIRE_SIGNING=true" >> "$GITHUB_ENV"
+          fi
           if [ -n "$KEYSTORE" ]; then
             echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
             echo "DBDELVE_SIGNING_STORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
             echo "Signing with the release key."
+          elif [ "$EVENT" = "pull_request" ]; then
+            echo "::warning::No DBDELVE_SIGNING_KEYSTORE_BASE64 secret: this pull request's APK is signed with a throwaway debug key and cannot update an installed one."
           else
-            echo "::warning::No DBDELVE_SIGNING_KEYSTORE_BASE64 secret: signed with a throwaway debug key, so this APK cannot update an installed one."
+            echo "::error::No DBDELVE_SIGNING_KEYSTORE_BASE64 secret. A $EVENT build is a release build and must be signed with the release key; see the README's Release builds."
+            exit 1
           fi
       - name: Build
         env:
@@ -114,6 +124,18 @@ jobs:
         run: |
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           ./gradlew --no-daemon :app:assembleRelease
+      # The key the APK was really signed with: never the debug key outside a
+      # pull request, whatever Gradle was told.
+      - name: Check the signature
+        if: github.event_name != 'pull_request'
+        run: |
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
+          certs="$("$apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk)"
+          echo "$certs" | grep 'Signer #1 certificate DN'
+          if echo "$certs" | grep -q 'CN=Android Debug'; then
+            echo "::error::The release APK is signed with a debug key."
+            exit 1
+          fi
       # Android Lint: the SDK's own static analysis, including Compose's
       # checks. Errors fail the build; the full report is kept either way.
       - name: Android Lint

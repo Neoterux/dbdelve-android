@@ -39,6 +39,13 @@ android {
         }
     }
 
+    // CI sets DBDELVE_REQUIRE_SIGNING outside pull requests: a release
+    // build there must not quietly fall back to the debug key.
+    val requireSigning = System.getenv("DBDELVE_REQUIRE_SIGNING") == "true"
+    check(!requireSigning || signingConfigs.findByName("release") != null) {
+        "DBDELVE_REQUIRE_SIGNING is set but DBDELVE_SIGNING_STORE is not: no release key to sign with."
+    }
+
     buildTypes {
         release {
             // R8 shrinks, optimises and obfuscates; proguard-rules.pro keeps

@@ -133,9 +133,13 @@ then open **Actions → build → Run workflow** and enter the version (e.g.
 publishes `dbdelve-android-0.2.0.apk` with that changelog section as its notes.
 Pushing a `v*` tag does the same.
 
-**Sign with your own key, once,** or each CI build is signed with a
-throwaway key, and Android refuses to install it over the previous one
-without uninstalling first, which deletes saved connections:
+**Sign with your own key, once.** Every build except a pull request's
+needs it: a push to `main`, a tag or a published release with no key fails
+instead of shipping an APK signed with a throwaway key, which Android refuses
+to install over the previous one without uninstalling first (and that deletes
+saved connections). After the build, CI checks the APK is not signed with a
+debug key. Pull requests still build with the runner's debug key, since a
+fork's pull request gets no secrets.
 
 ```sh
 keytool -genkeypair -v -keystore dbdelve-release.jks -alias dbdelve \
