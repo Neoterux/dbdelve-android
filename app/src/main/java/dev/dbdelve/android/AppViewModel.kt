@@ -13,10 +13,8 @@ import dev.dbdelve.android.data.ProfileStore
 import dev.dbdelve.android.data.Secrets
 import dev.dbdelve.android.data.ConnectionBundle
 import dev.dbdelve.android.data.SavedQuery
+import dev.dbdelve.android.data.SavedQueryStore
 import dev.dbdelve.android.data.SharedConnection
-import dev.dbdelve.android.data.ConnectionBundle
-import dev.dbdelve.android.data.SavedQuery
-import dev.dbdelve.android.data.SharedConnectionStore
 import dev.dbdelve.android.data.TabStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
