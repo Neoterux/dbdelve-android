@@ -9,6 +9,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
+import dev.dbdelve.android.data.HistoryStore
 import dev.dbdelve.android.data.Profile
 import dev.dbdelve.android.data.ProfileStore
 import dev.dbdelve.android.data.SavedQueryStore
@@ -64,6 +65,7 @@ class ScreensTest {
             Secrets(app),
             TabStore(File(files, "tabs")),
             SavedQueryStore(files),
+            HistoryStore(File(files, "history")),
             updates,
             installedVersion = "0.0.0",
             tlsDir = File(files, "tls"),
@@ -170,6 +172,19 @@ class ScreensTest {
         await { model.tab?.result != null || model.tab?.error != null }
         check(model.tab?.error == null) { "the grouped query failed: ${model.tab?.error}" }
         shot("11-count-results")
+
+        // A failure, so history shows both kinds.
+        compose.runOnIdle {
+            model.newTab("typo", "SELECT * FROM order_itmes;")
+            model.edit(model.tab!!, textAt(model.tab!!.text.text))
+            model.runAtCursor()
+        }
+        await { model.tab?.error != null }
+        check(model.history.size >= 4) { "history holds ${model.history.size}" }
+        check(model.history.first().error != null && model.history.first().text.trimEnd(';') == "SELECT * FROM order_itmes") { "history begins ${model.history.first()}" }
+        compose.runOnIdle { model.pane = Pane.QUERY }
+        compose.onNodeWithContentDescription("History").performClick()
+        shot("12-history")
     }
 
     /**

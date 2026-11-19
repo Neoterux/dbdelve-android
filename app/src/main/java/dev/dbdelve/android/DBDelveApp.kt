@@ -1,6 +1,7 @@
 package dev.dbdelve.android
 
 import android.app.Application
+import dev.dbdelve.android.data.HistoryStore
 import dev.dbdelve.android.data.ProfileStore
 import dev.dbdelve.android.data.SavedQueryStore
 import dev.dbdelve.android.data.Secrets
@@ -21,6 +22,7 @@ class DBDelveApp : Application() {
             Secrets(this),
             TabStore(File(filesDir, "tabs")),
             SavedQueryStore(filesDir),
+            HistoryStore(File(filesDir, "history")),
             UpdateStore(this),
             packageManager.getPackageInfo(packageName, 0).versionName ?: "0",
             File(noBackupFilesDir, "tls"),

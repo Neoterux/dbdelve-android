@@ -37,9 +37,9 @@ Drawn by `ScreensTest` from the app's own screens, connected to a Postgres
 |---|---|---|---|
 | ![Tables and views with their sizes](screenshots/schema.png) | ![The builder: columns, two filters, and the statement it writes pinned above Run](screenshots/builder.png) | ![The built query's rows](screenshots/builder-results.png) | ![The built statement in a tab of its own](screenshots/built-tab.png) |
 
-| IN and an OR group | Count per group | Counted rows |
-|---|---|---|
-| ![An IN filter with two values, and a second group joined by OR](screenshots/builder-or.png) | ![Count rows, grouped by status, sorted by the count](screenshots/builder-count.png) | ![One row per status with its count](screenshots/count-results.png) |
+| IN and an OR group | Count per group | Counted rows | History |
+|---|---|---|---|
+| ![An IN filter with two values, and a second group joined by OR](screenshots/builder-or.png) | ![Count rows, grouped by status, sorted by the count](screenshots/builder-count.png) | ![One row per status with its count](screenshots/count-results.png) | ![Statements as sent, newest first, each with its outcome and when](screenshots/history.png) |
 
 ## Target
 
@@ -373,6 +373,17 @@ into the statement, and the filled statement passes the same gate as anything
 typed. A `:name` inside a string, a comment or a Postgres `::cast` is not a
 parameter. On MongoDB, `db.orders.find({status: :status})` works the same way.
 
+## History
+
+The clock beside the editor's bookmarks lists every statement this
+connection sent, newest first: the exact text (a saved query's or the
+builder's with its values filled in), when, and what came of it: rows and
+time, rows affected, or the error. Tap one to open it in a tab of its own;
+the copy button copies it. A statement sent again moves to the top. Only
+what the gate let through is here, since a stop sends nothing; nor are the
+user-management statements, which carry password hashes. The last 200 are
+kept per connection, on the phone only, and **Clear** forgets them.
+
 ## Sharing connections
 
 **⋮ → Share connections** seals the chosen connections, with or without their
@@ -441,7 +452,7 @@ Deliberate cuts, not oversights; those with a ceiling in the code are marked
   doesn't have.
 - **Results across restarts.** Query tabs and their text are kept per
   connection; results are not, and nothing runs again on its own.
-- **Command palette, query history, completion, Explain, and the tablet
+- **Command palette, completion, Explain, and the tablet
   layout from the mockup** ([docs/mockup.html](docs/mockup.html)).
 
 ## What has and hasn't been compiled

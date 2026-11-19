@@ -7,6 +7,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import dev.dbdelve.android.data.ClientCert
+import dev.dbdelve.android.data.HistoryEntry
+import dev.dbdelve.android.data.HistoryStore
 import dev.dbdelve.android.data.Profile
 import dev.dbdelve.android.data.ProfileStore
 import dev.dbdelve.android.data.Secrets
@@ -100,6 +102,7 @@ class AppViewModel(
     private val secrets: Secrets,
     private val tabStore: TabStore,
     private val savedStore: SavedQueryStore,
+    private val historyStore: HistoryStore,
     private val updates: UpdateStore,
     /** This build's versionName, which releases are compared against. */
     val installedVersion: String,
@@ -180,6 +183,7 @@ class AppViewModel(
         store.save(profiles)
         secrets.forget(profile.id)
         tabStore.forget(profile.id)
+        historyStore.forget(profile.id)
         allSaved = allSaved.filterNot { it.profileId == profile.id }
         savedStore.save(allSaved)
     }
@@ -297,6 +301,7 @@ class AppViewModel(
                 this@AppViewModel.profile = profile
                 mode = profile.mode
                 restoreTabs(profile)
+                history = withContext(Dispatchers.IO) { historyStore.load(profile.id) }
                 builder = BuilderState()
                 input = QueryInput.TEXT
                 pane = Pane.QUERY
@@ -313,6 +318,7 @@ class AppViewModel(
         running = false
         profile = null
         catalog = emptyList()
+        history = emptyList()
         gate = null
         users = emptyList()
         grants = emptyMap()
@@ -378,6 +384,41 @@ class AppViewModel(
         }
     }
 
+    /** The open connection's statements as sent, newest first. */
+    var history by mutableStateOf<List<HistoryEntry>>(emptyList())
+        private set
+
+    /** Keeps what was sent and what came of it, for this connection. */
+    private fun record(statement: String, sent: Long, result: ResultSet?, error: String?) {
+        val id = profile?.id ?: return
+        val entry = HistoryEntry(
+            text = statement,
+            at = sent,
+            elapsedMs = result?.elapsedMs?.toLong(),
+            rows = result?.takeIf { it.columns.isNotEmpty() }?.rows?.size,
+            capped = result?.capped == true,
+            affected = result?.affected?.toLong(),
+            error = error?.take(HistoryStore.ERROR_CHARS),
+        )
+        // A statement run again moves to the top rather than filling the list.
+        history = (listOf(entry) + history.filterNot { it.text == statement }).take(HistoryStore.LIMIT)
+        val snapshot = history
+        scope.launch(Dispatchers.IO) { historyStore.save(id, snapshot) }
+    }
+
+    fun clearHistory() {
+        val id = profile?.id ?: return
+        history = emptyList()
+        scope.launch(Dispatchers.IO) { historyStore.forget(id) }
+    }
+
+    /** A statement from history in a tab of its own, to read, edit or run. */
+    fun openFromHistory(entry: HistoryEntry) {
+        newTab("History", entry.text)
+        input = QueryInput.TEXT
+        pane = Pane.QUERY
+    }
+
     /** Runs the statement under the cursor, as typed. */
     fun runAtCursor() {
         val tab = tab ?: return
@@ -395,6 +436,7 @@ class AppViewModel(
         onceIn: Mode?,
     ) {
         val limit = rowLimit.toUInt()
+        val sent = System.currentTimeMillis()
         send(
             shown = statement,
             confirmed = confirmed,
@@ -402,12 +444,14 @@ class AppViewModel(
             retry = { again, once, mode -> execute(tab, statement, again, once, mode) },
             call = { it.run(statement, limit, confirmed, runOnce, onceIn) },
             done = { result ->
+                record(statement, sent, result, null)
                 tab.result = result
                 tab.error = null
                 tab.ran = statement
                 pane = Pane.RESULTS
             },
             failed = { reason ->
+                record(statement, sent, null, reason)
                 tab.error = reason
                 tab.ran = statement
                 pane = Pane.RESULTS

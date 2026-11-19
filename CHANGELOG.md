@@ -14,6 +14,9 @@ to its version and date.
   no longer pushes you to TLS Off. On Postgres a self-signed server
   certificate works as its own CA. Errors now say why a certificate was
   refused and what to add.
+- History for each connection: every statement sent, exactly as sent, with
+  when it ran and its rows, rows affected or error. Tap one to open it in a
+  tab; search it, copy from it, or clear it.
 - Client certificates, for servers that admit users by certificate. The key is
   sealed by the phone's Keystore, like passwords.
 - A query builder beside the SQL editor: choose a table, tap the columns,

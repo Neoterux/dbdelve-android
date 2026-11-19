@@ -3,6 +3,7 @@ package dev.dbdelve.android.ui
 import android.content.Context
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,9 +18,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircleOutline
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -44,7 +49,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -52,6 +59,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.dbdelve.android.AppViewModel
+import dev.dbdelve.android.data.HistoryEntry
 import dev.dbdelve.android.data.SavedQuery
 import uniffi.dbdelve_core.Binding
 import uniffi.dbdelve_core.ParamValue
@@ -339,4 +347,98 @@ fun ChangelogSheet(onDismiss: () -> Unit) {
 fun shareCsv(context: Context, name: String, csv: String) {
     val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "results" }.take(60)
     shareFile(context, "$safe.csv", csv.toByteArray(), "text/csv")
+}
+
+/** The open connection's statements as sent, newest first: open one, or copy it. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HistorySheet(model: AppViewModel, onDismiss: () -> Unit) {
+    var filter by remember { mutableStateOf("") }
+    var confirmClear by remember { mutableStateOf(false) }
+    val clipboard = LocalClipboardManager.current
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) { SheetTitle("History", "${model.profile?.name}: exactly as sent") }
+            if (model.history.isNotEmpty()) {
+                TextButton(onClick = { confirmClear = true }, modifier = Modifier.padding(end = 12.dp)) { Text("Clear") }
+            }
+        }
+        OutlinedTextField(
+            value = filter,
+            onValueChange = { filter = it },
+            leadingIcon = { Icon(Icons.Default.Search, null) },
+            placeholder = { Text("Search") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+        )
+        if (model.history.isEmpty()) {
+            Text(
+                "Nothing run on this connection yet. Every statement sent is kept here, newest first, with when it ran and what came of it.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(24.dp),
+            )
+        }
+        val shown = model.history.filter { filter.isBlank() || it.text.contains(filter.trim(), ignoreCase = true) }
+        val now = System.currentTimeMillis()
+        LazyColumn(Modifier.heightIn(max = 520.dp).navigationBarsPadding()) {
+            items(shown, key = { it.at.toString() + it.text.hashCode() }) { entry ->
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            model.openFromHistory(entry)
+                            onDismiss()
+                        }
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val palette = LocalPalette.current
+                        Icon(
+                            if (entry.error != null) Icons.Default.ErrorOutline else Icons.Default.CheckCircleOutline,
+                            contentDescription = if (entry.error != null) "Failed" else "Ran",
+                            tint = if (entry.error != null) palette.red else palette.green,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Text(outcome(entry), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(ago(now - entry.at), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        IconButton(onClick = { clipboard.setText(AnnotatedString(entry.text)) }, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy", modifier = Modifier.size(18.dp))
+                        }
+                    }
+                    Text(entry.text, fontFamily = Mono, fontSize = 12.sp, lineHeight = 16.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                }
+                HorizontalDivider()
+            }
+        }
+    }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("Clear this connection's history?") },
+            text = { Text("The list on this phone goes; nothing on the server changes.") },
+            confirmButton = { TextButton(onClick = { model.clearHistory(); confirmClear = false }) { Text("Clear") } },
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } },
+        )
+    }
+}
+
+private fun outcome(entry: HistoryEntry): String {
+    val time = entry.elapsedMs?.let { " · ${it} ms" }.orEmpty()
+    return when {
+        entry.error != null -> entry.error.lineSequence().first()
+        entry.rows != null -> "%,d row%s%s".format(entry.rows, if (entry.rows == 1) "" else "s", if (entry.capped) ", capped" else "") + time
+        entry.affected != null -> "%,d affected".format(entry.affected) + time
+        else -> "Done$time"
+    }
+}
+
+private fun ago(ms: Long): String {
+    val minutes = ms / 60_000
+    return when {
+        minutes < 1 -> "now"
+        minutes < 60 -> "${minutes}m"
+        minutes < 24 * 60 -> "${minutes / 60}h"
+        else -> "${minutes / (24 * 60)}d"
+    }
 }

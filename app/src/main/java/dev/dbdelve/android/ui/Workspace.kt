@@ -104,6 +104,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Bookmarks
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.CheckCircleOutline
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
@@ -484,6 +485,7 @@ private fun Editor(model: AppViewModel) {
 
         val haptics = LocalHapticFeedback.current
         var savedOpen by remember { mutableStateOf(false) }
+        var historyOpen by remember { mutableStateOf(false) }
         var saving by remember { mutableStateOf(false) }
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
@@ -491,6 +493,7 @@ private fun Editor(model: AppViewModel) {
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             RowLimit(model)
+            IconButton(onClick = { historyOpen = true }) { Icon(Icons.Default.History, contentDescription = "History") }
             IconButton(onClick = { savedOpen = true }) { Icon(Icons.Default.Bookmarks, contentDescription = "Saved queries") }
             IconButton(onClick = { saving = true }, enabled = tab.text.text.isNotBlank()) {
                 Icon(Icons.Default.BookmarkAdd, contentDescription = "Save this query")
@@ -518,6 +521,7 @@ private fun Editor(model: AppViewModel) {
             }
         }
         if (savedOpen) SavedQueriesSheet(model) { savedOpen = false }
+        if (historyOpen) HistorySheet(model) { historyOpen = false }
         if (saving) {
             SaveQueryDialog(
                 initial = tab.title.takeUnless { it.startsWith("Query ") }.orEmpty(),
