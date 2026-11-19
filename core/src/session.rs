@@ -6,14 +6,14 @@
 //! module is a future.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use bson::{Bson, Document};
 use futures_util::{StreamExt, TryStreamExt, pin_mut};
 use mysql::prelude::Queryable;
 use tokio::runtime::Runtime;
-use tokio_postgres::{CancelToken, SimpleQueryMessage};
+use tokio_postgres::{CancelToken, SimpleQueryMessage, SimpleQueryRow};
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 use crate::gate::{self, Destructive, Mode, Stop, Verdict};
@@ -180,14 +180,14 @@ impl Session {
     }
 
     pub fn mode(&self) -> Mode {
-        *self.mode.lock().unwrap()
+        *self.mode.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The only place a session's mode changes. The server's hold follows it,
     /// and the mode is not changed if the server will not.
     pub fn set_mode(&self, mode: Mode) -> Result<(), CoreError> {
         self.hold(mode)?;
-        *self.mode.lock().unwrap() = mode;
+        *self.mode.lock().unwrap_or_else(PoisonError::into_inner) = mode;
         Ok(())
     }
 
@@ -230,7 +230,7 @@ impl Session {
     }
 
     pub fn prepare_user(&self, action: UserAction) -> Result<Arc<Prepared>, CoreError> {
-        let database = match &*self.driver.lock().unwrap() {
+        let database = match &*self.driver.lock().unwrap_or_else(PoisonError::into_inner) {
             Driver::Mongo { database, .. } => database.name().to_owned(),
             _ => String::new(),
         };
@@ -240,7 +240,7 @@ impl Session {
     /// The server's users and roles. DBDelve's own catalog read, like
     /// [`Session::catalog`].
     pub fn users(&self) -> Result<Vec<DbUser>, CoreError> {
-        let mut driver = self.driver.lock().unwrap();
+        let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *driver {
             Driver::Postgres { runtime, client } => {
                 let rows = runtime
@@ -263,7 +263,7 @@ impl Session {
                     })
                     .map(|row| {
                         // `::text` on a boolean spells it out: `true`, not the bare `t`.
-                        let flag = |at: usize| row.get(at) == Some("true");
+                        let flag = |at: usize| text(&row, at) == Some("true");
                         let mut attributes = Vec::new();
                         for (at, name) in [
                             (3, "create db"),
@@ -275,28 +275,30 @@ impl Session {
                                 attributes.push(name.to_owned());
                             }
                         }
-                        if let Some(limit) = row.get(7).filter(|limit| *limit != "-1") {
+                        if let Some(limit) = text(&row, 7).filter(|limit| *limit != "-1") {
                             attributes.push(format!("{limit} connections"));
                         }
-                        if let Some(until) = row.get(8).filter(|until| !until.is_empty()) {
+                        if let Some(until) = text(&row, 8).filter(|until| !until.is_empty()) {
                             attributes.push(format!("valid until {until}"));
                         }
                         DbUser {
                             account: Account {
-                                name: row.get(0).unwrap_or_default().to_owned(),
+                                name: text(&row, 0).unwrap_or_default().to_owned(),
                                 host: String::new(),
                             },
                             can_login: flag(1),
                             superuser: flag(2),
                             attributes,
-                            roles: serde_json::from_str::<Vec<String>>(row.get(9).unwrap_or("[]"))
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|role| RoleRef {
-                                    role,
-                                    database: String::new(),
-                                })
-                                .collect(),
+                            roles: serde_json::from_str::<Vec<String>>(
+                                text(&row, 9).unwrap_or("[]"),
+                            )
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|role| RoleRef {
+                                role,
+                                database: String::new(),
+                            })
+                            .collect(),
                         }
                     })
                     .collect())
@@ -355,7 +357,7 @@ impl Session {
         if account.name.contains('\\') || account.host.contains('\\') {
             return Err(query_error("Names with a backslash are not looked up."));
         }
-        let mut driver = self.driver.lock().unwrap();
+        let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *driver {
             Driver::Postgres { runtime, client } => {
                 let rows = runtime
@@ -370,7 +372,7 @@ impl Session {
                 Ok(rows
                     .iter()
                     .filter_map(|message| match message {
-                        SimpleQueryMessage::Row(row) => row.get(0).map(str::to_owned),
+                        SimpleQueryMessage::Row(row) => text(&row, 0).map(str::to_owned),
                         _ => None,
                     })
                     .collect())
@@ -469,7 +471,7 @@ impl Session {
     }
 
     pub fn catalog(&self) -> Result<Vec<CatalogEntry>, CoreError> {
-        let mut driver = self.driver.lock().unwrap();
+        let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *driver {
             Driver::Postgres { runtime, client } => {
                 let rows = runtime
@@ -487,14 +489,14 @@ impl Session {
                     .iter()
                     .filter_map(|message| match message {
                         SimpleQueryMessage::Row(row) => Some(CatalogEntry {
-                            schema: row.get(0).unwrap_or_default().to_owned(),
-                            name: row.get(1).unwrap_or_default().to_owned(),
-                            kind: if matches!(row.get(2), Some("v" | "m")) {
+                            schema: text(&row, 0).unwrap_or_default().to_owned(),
+                            name: text(&row, 1).unwrap_or_default().to_owned(),
+                            kind: if matches!(text(&row, 2), Some("v" | "m")) {
                                 ObjectKind::View
                             } else {
                                 ObjectKind::Table
                             },
-                            size_bytes: row.get(3).and_then(|size| size.parse().ok()),
+                            size_bytes: text(&row, 3).and_then(|size| size.parse().ok()),
                         }),
                         _ => None,
                     })
@@ -599,7 +601,7 @@ impl Session {
     /// behind the gate, not the boundary: a write-less role is.
     fn hold(&self, mode: Mode) -> Result<(), CoreError> {
         let read_only = mode == Mode::ReadOnly;
-        let mut driver = self.driver.lock().unwrap();
+        let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *driver {
             Driver::Postgres { runtime, client } => runtime
                 .block_on(client.batch_execute(if read_only {
@@ -627,7 +629,7 @@ impl Session {
     fn send(&self, statement: &str, limit: usize) -> Result<ResultSet, CoreError> {
         let started = Instant::now();
         let stoppable = gate::stoppable(self.engine, statement);
-        let mut driver = self.driver.lock().unwrap();
+        let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         let mut result = match (&mut *driver, &self.canceller) {
             (Driver::Postgres { runtime, client }, Canceller::Postgres(stop)) => {
                 runtime.block_on(run_postgres(
@@ -648,6 +650,12 @@ impl Session {
         result.elapsed_ms = started.elapsed().as_millis() as u64;
         Ok(result)
     }
+}
+
+/// A Postgres value as text. `SimpleQueryRow::get` panics on bytes that are
+/// not UTF-8, which a `SQL_ASCII` database can hold; those are marked instead.
+fn text(row: &SimpleQueryRow, at: usize) -> Option<&str> {
+    row.try_get(at).unwrap_or(Some("\u{FFFD} (not UTF-8)"))
 }
 
 fn empty_result() -> ResultSet {
@@ -698,7 +706,7 @@ fn connect_postgres(config: &ConnectionConfig) -> Result<(Driver, Canceller), Co
         .map_err(|error| connect_error(postgres_error(error)))?
         .iter()
         .find_map(|message| match message {
-            SimpleQueryMessage::Row(row) => row.get(0).and_then(|pid| pid.parse().ok()),
+            SimpleQueryMessage::Row(row) => text(&row, 0).and_then(|pid| pid.parse().ok()),
             _ => None,
         })
         .ok_or_else(|| {
@@ -731,7 +739,15 @@ impl PostgresStop {
     /// process running exactly it as a transaction of its own: a cancel
     /// inside a transaction the user opened would abort all of it. Anything
     /// it cannot confirm leaves the read to drain, which is only slower.
-    async fn stop_if_alone(self, statement: String, requested: Arc<AtomicBool>) {
+    ///
+    /// `finished` is set once the read has ended; a later run of the same
+    /// text must never be the one cancelled.
+    async fn stop_if_alone(
+        self,
+        statement: String,
+        requested: Arc<AtomicBool>,
+        finished: Arc<AtomicBool>,
+    ) {
         let side = match &self.tls {
             Some(tls) => self
                 .config
@@ -758,13 +774,22 @@ impl PostgresStop {
                 &[&self.pid, &statement],
             )
             .await;
-        if matches!(alone, Ok(Some(_))) {
+        if matches!(alone, Ok(Some(_))) && !finished.load(Ordering::SeqCst) {
             requested.store(true, Ordering::SeqCst);
             let _ = match &self.tls {
                 Some(tls) => self.token.cancel_query(tls.clone()).await,
                 None => self.token.cancel_query(tokio_postgres::NoTls).await,
             };
         }
+    }
+}
+
+/// Set when a read ends, however it ends.
+struct Finished(Arc<AtomicBool>);
+
+impl Drop for Finished {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
     }
 }
 
@@ -785,6 +810,7 @@ async fn run_postgres(
     let mut result = empty_result();
     let mut stop = stop;
     let requested = Arc::new(AtomicBool::new(false));
+    let finished = Finished(Arc::new(AtomicBool::new(false)));
     loop {
         let message = match stream.try_next().await {
             Ok(Some(message)) => message,
@@ -816,7 +842,7 @@ async fn run_postgres(
                 if result.rows.len() < limit {
                     result.rows.push(
                         (0..row.len())
-                            .map(|at| row.get(at).map(str::to_owned))
+                            .map(|at| text(&row, at).map(str::to_owned))
                             .collect(),
                     );
                 } else {
@@ -825,10 +851,12 @@ async fn run_postgres(
                         // A thread of its own: rows already buffered never
                         // yield this runtime, so a task here would wait for
                         // the very drain it is meant to cut short.
-                        let (statement, requested) = (statement.to_owned(), requested.clone());
+                        let (statement, requested, finished) =
+                            (statement.to_owned(), requested.clone(), finished.0.clone());
                         std::thread::spawn(move || {
                             if let Ok(runtime) = runtime() {
-                                runtime.block_on(stop.stop_if_alone(statement, requested));
+                                runtime
+                                    .block_on(stop.stop_if_alone(statement, requested, finished));
                             }
                         });
                     }
