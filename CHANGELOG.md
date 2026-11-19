@@ -14,6 +14,9 @@ to its version and date.
   no longer pushes you to TLS Off. On Postgres a self-signed server
   certificate works as its own CA. Errors now say why a certificate was
   refused and what to add.
+- Completion in the editor: the columns of the tables you name, and table
+  or collection names, above the key row as you type; after `alias.`, that
+  table's columns. A tap puts the name in, quoted where it must be.
 - Explain, under the editor: the plan of the statement under the cursor,
   or the plan with timings, which runs it (and asks first, as the statement
   would, if it writes). Your text is left as it is. MongoDB plans show one

@@ -42,9 +42,9 @@ Drawn by `ScreensTest` from the app's own screens, connected to a Postgres
 |---|---|---|---|
 | ![An IN filter with two values, and a second group joined by OR](screenshots/builder-or.png) | ![Count rows, grouped by status, sorted by the count](screenshots/builder-count.png) | ![One row per status with its count](screenshots/count-results.png) | ![Statements as sent, newest first, each with its outcome and when](screenshots/history.png) |
 
-| Explain | A newer release |
-|---|---|
-| ![A Postgres plan with timings, as text](screenshots/explain.png) | ![The update notice and the release's notes](screenshots/update-notes.png) |
+| Explain | Completion | A newer release |
+|---|---|---|
+| ![A Postgres plan with timings, as text](screenshots/explain.png) | ![A column of the table named, offered above the key row](screenshots/completion.png) | ![The update notice and the release's notes](screenshots/update-notes.png) |
 
 ## Target
 
@@ -379,6 +379,18 @@ into the statement, and the filled statement passes the same gate as anything
 typed. A `:name` inside a string, a comment or a Postgres `::cast` is not a
 parameter. On MongoDB, `db.orders.find({status: :status})` works the same way.
 
+## Completion
+
+As you type, the names that complete the word at the cursor show above the
+key row: the columns of the tables the text names, then tables (or, after
+`db.`, collections). After `alias.` it offers that table's columns, reading
+`FROM orders o` and `JOIN orders AS o`. A tap replaces the word, quoting a
+name the engine would otherwise read differently (`"Orders"` on Postgres,
+which folds unquoted names to lower case). Names come from the schema list
+and the server's own column list, read once per table per connection, and
+not while a statement runs. No keywords and no guesses: only names that
+exist.
+
 ## Explain
 
 The plan icon under the editor explains the statement under the cursor:
@@ -478,7 +490,7 @@ Deliberate cuts, not oversights; those with a ceiling in the code are marked
   doesn't have.
 - **Results across restarts.** Query tabs and their text are kept per
   connection; results are not, and nothing runs again on its own.
-- **Command palette, completion, and the tablet
+- **Command palette, and the tablet
   layout from the mockup** ([docs/mockup.html](docs/mockup.html)).
 
 ## What has and hasn't been compiled

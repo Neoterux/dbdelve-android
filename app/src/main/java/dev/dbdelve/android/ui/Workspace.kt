@@ -78,6 +78,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import kotlinx.coroutines.delay
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
@@ -120,6 +121,7 @@ import androidx.compose.material.icons.filled.TableRows
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VerticalAlignBottom
 import androidx.compose.material.icons.filled.ViewAgenda
+import androidx.compose.material.icons.filled.ViewColumn
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Badge
@@ -131,6 +133,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import dev.dbdelve.android.QueryInput
 import dev.dbdelve.android.AppViewModel
+import dev.dbdelve.android.Completion
 import dev.dbdelve.android.Pane
 import dev.dbdelve.android.PendingGate
 import dev.dbdelve.android.QueryTab
@@ -592,6 +595,7 @@ private fun Editor(model: AppViewModel) {
                 saving = false
             }
         }
+        Completions(model, tab)
         AccessoryKeys(tab) { model.edit(tab, it) }
     }
 }
@@ -615,6 +619,53 @@ private fun RowLimit(model: AppViewModel) {
 }
 
 /** The keys a soft keyboard buries two layers deep. */
+/**
+ * Table and column names for the word at the cursor, above the key row; a tap
+ * replaces the word with the name, quoted if the engine needs it.
+ */
+@Composable
+private fun Completions(model: AppViewModel, tab: QueryTab) {
+    val text = tab.text.text
+    val cursor = tab.text.selection.start
+    // Read the columns of tables as the text names them, once it settles.
+    LaunchedEffect(text, model.catalog) {
+        delay(300)
+        model.loadColumnsFor(text)
+    }
+    if (!tab.text.selection.collapsed) return
+    val found = remember(text, cursor, model.catalog, model.columnCache.toMap()) { model.completions(text, cursor) } ?: return
+    val (word, suggestions) = found
+    if (suggestions.isEmpty()) return
+    val palette = LocalPalette.current
+    LazyRow(
+        Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainer),
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        items(suggestions, key = { it.insert }) { suggestion ->
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier.clickable {
+                    val next = text.substring(0, word.start) + suggestion.insert + text.substring(cursor)
+                    val at = word.start + suggestion.insert.length
+                    model.edit(tab, TextFieldValue(next, TextRange(at)))
+                },
+            ) {
+                Row(Modifier.padding(horizontal = 10.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        if (suggestion.kind == Completion.Kind.TABLE) Icons.Default.TableChart else Icons.Default.ViewColumn,
+                        contentDescription = if (suggestion.kind == Completion.Kind.TABLE) "Table" else "Column",
+                        tint = if (suggestion.kind == Completion.Kind.TABLE) palette.blue else palette.aqua,
+                        modifier = Modifier.size(14.dp),
+                    )
+                    Text(suggestion.name, fontFamily = Mono, fontSize = 13.sp, modifier = Modifier.padding(start = 6.dp))
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AccessoryKeys(tab: QueryTab, onPress: (TextFieldValue) -> Unit) {
     val keys = listOf("⇥", "(", ")", "'", "\"", ";", "*", "=", ".", ",", "{", "}", "[", "]", ":", "$", "_", "←", "→")

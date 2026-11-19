@@ -199,6 +199,17 @@ class ScreensTest {
         shot("13-explain")
         compose.runOnIdle { model.pane = Pane.QUERY }
         shot("14-editor-tools")
+
+        compose.runOnIdle {
+            val text = "SELECT id, total\nFROM orders\nWHERE st"
+            model.newTab("complete", text)
+            model.edit(model.tab!!, androidx.compose.ui.text.input.TextFieldValue(text, androidx.compose.ui.text.TextRange(text.length)))
+        }
+        await { "orders" in model.columnCache }
+        check(model.completions(model.tab!!.text.text, model.tab!!.text.text.length)?.second?.map { it.name } == listOf("status")) {
+            "completion offered ${model.completions(model.tab!!.text.text, model.tab!!.text.text.length)}"
+        }
+        shot("17-completion")
     }
 
     /** The notice of a newer release, with its notes from GitHub. Needs no database. */

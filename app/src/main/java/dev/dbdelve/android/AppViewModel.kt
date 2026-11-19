@@ -2,6 +2,7 @@ package dev.dbdelve.android
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.TextRange
@@ -319,6 +320,7 @@ class AppViewModel(
         running = false
         profile = null
         catalog = emptyList()
+        columnCache.clear()
         history = emptyList()
         gate = null
         users = emptyList()
@@ -666,8 +668,47 @@ class AppViewModel(
             refreshingCatalog = false
             listed.onSuccess {
                 catalog = it
+                // Tables may have changed: their columns are read again as named.
+                columnCache.clear()
                 catalogError = null
             }.onFailure { catalogError = it.reason() }
+        }
+    }
+
+    /** Column names by table name, read as the editor's text names tables. */
+    val columnCache = mutableStateMapOf<String, List<String>>()
+    private val columnsLoading = mutableSetOf<String>()
+
+    /** Names to complete the word at the cursor with: see [Completion]. */
+    fun completions(text: String, cursor: Int): Pair<Completion.Word, List<Completion.Suggestion>>? {
+        val engine = session?.engine() ?: return null
+        val word = Completion.word(text, cursor) ?: return null
+        val tables = catalog.map { it.name }.distinct()
+        return word to Completion.suggest(engine, text, word, tables, columnsOf = { columnCache[it] })
+    }
+
+    /**
+     * Reads the columns of the tables [text] names, each once per connection,
+     * so completion can offer them. Not while a statement runs: the session
+     * would only queue the read behind it.
+     */
+    fun loadColumnsFor(text: String) {
+        val session = session ?: return
+        if (running) return
+        val engine = session.engine()
+        val names = catalog.map { it.name }.distinct()
+        val wanted = Completion.referenced(engine, text, names).toMutableSet()
+        Completion.word(text, text.length)?.qualifier?.let { alias -> Completion.aliased(text, alias, names)?.let(wanted::add) }
+        for (name in wanted) {
+            if (name in columnCache || !columnsLoading.add(name)) continue
+            val entry = catalog.firstOrNull { it.name == name } ?: continue
+            scope.launch {
+                val read = withContext(Dispatchers.IO) { runCatching { session.columns(entry.schema, entry.name) } }
+                columnsLoading.remove(name)
+                if (this@AppViewModel.session !== session) return@launch
+                // A failed read leaves nothing to offer, quietly: completion is a help.
+                columnCache[name] = read.getOrNull()?.map { it.name }.orEmpty()
+            }
         }
     }
 
