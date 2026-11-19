@@ -10,8 +10,11 @@ android {
 
     defaultConfig {
         applicationId = "dev.dbdelve.android"
-        // Android 15 only: nothing older to stay compatible with.
-        minSdk = 35
+        // Android 13 and later. Nothing in the app calls a newer API than
+        // 33; the Android 15 foreground-service timeout is a callback that
+        // older releases simply never make. Keep cargo-ndk's `-p` below equal
+        // to this: the core is linked against that release's libc.
+        minSdk = 33
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
@@ -74,7 +77,7 @@ val cargoNdk by tasks.registering(Exec::class) {
     commandLine(
         "cargo", "ndk",
         "-t", "arm64-v8a",
-        "-p", "35",
+        "-p", "33",
         "-o", jniLibsDir.get().asFile.absolutePath,
         "build", "--release", "--lib",
     )
