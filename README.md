@@ -133,8 +133,9 @@ They prove, on each engine, that:
 - The row limit keeps two of three rows and reports that it capped.
 - A drop asks for Full and then for confirmation, and a run once leaves the
   mode where it was.
-- On Postgres and MySQL, the server's own hold refuses a write the parser
-  cannot read when it is run once in Read-only.
+- In Read-only, a write the parser cannot read is refused before it is sent;
+  and on Postgres and MySQL the server's own hold still refuses a write
+  hidden in a function the gate reads as a plain `SELECT`.
 - Cancel stops a 30-second sleep.
 - A read past the row limit is stopped, not drained: a twenty-million-row
   Postgres read and a multi-million-row MySQL cross join both come back in
@@ -155,6 +156,24 @@ They prove, on each engine, that:
   sends `KILL QUERY` on a side connection.
 - Auth is `mysql_native_password`, 5.6's default.
 
+## Connection modes
+
+Every statement is classified before it is sent, and runs only if the
+connection's mode allows it: Read-only, Read-write, or Full, which writes
+and drops need. Three rules keep the gate honest where parser and server could
+read the same text differently:
+
+- **A statement the parser cannot read needs Read-write**, even to run once,
+  and asks first. Read-only runs only what the gate has read as a read. The
+  server's read-only hold is a backstop, not the boundary: a statement can lift
+  it (`BEGIN READ WRITE`), and some writes ignore it (`SELECT … INTO OUTFILE`).
+- **Any backslash makes a statement unreadable.** Whether `\'` ends a string is
+  a server setting (`standard_conforming_strings`, `NO_BACKSLASH_ESCAPES`) the
+  parser cannot see, and read the other way a string can hide a `DROP`. A
+  regex such as `'\d+'` therefore asks before it runs.
+- **Server-wide settings need Full.** `SET GLOBAL` and `SET @@global.…` reach
+  every other session, and a read-only transaction does not stop them.
+
 ## The row limit
 
 The limit keeps that many rows of your statement as they arrive, and never
@@ -172,11 +191,12 @@ Commands use the shell's spelling with JSON5 arguments, one per statement:
 that aren't identifiers. Supported methods: `find`, `aggregate`,
 `countDocuments`, `insertOne`/`insertMany`, `updateOne`/`updateMany`,
 `deleteOne`/`deleteMany`, `drop`. Types go in Extended JSON:
-`{_id: {$oid: '…'}}`.
+`{_id: {$oid: '…'}}`. Options the app does not pass on (`upsert`,
+`arrayFilters`, a collation) are refused, never silently dropped: dropping
+one would run a different command from the one typed.
 
 MongoDB has no server-side read-only hold, so in Read-only the gate is the only
-thing that stops a write. Because of that, a command DBDelve cannot read needs
-Read-write even to run once. Use a read-only role for anything that matters.
+thing that stops a write. Use a read-only role for anything that matters.
 
 ## Users and roles
 

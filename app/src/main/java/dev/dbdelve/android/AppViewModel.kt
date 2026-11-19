@@ -121,7 +121,12 @@ class AppViewModel(
         screen = Screen.Connections
     }
 
-    fun password(profile: Profile): String = secrets.password(profile.id)
+    /**
+     * The saved password, or blank when the Keystore can no longer open it
+     * (a key invalidated by a lock-screen reset): the form then asks again
+     * rather than the app crashing.
+     */
+    fun password(profile: Profile): String = runCatching { secrets.password(profile.id) }.getOrDefault("")
 
     fun deleteProfile(profile: Profile) {
         profiles = profiles.filterNot { it.id == profile.id }
@@ -155,6 +160,7 @@ class AppViewModel(
         saveTabs(now = true)
         val closing = session
         session = null
+        running = false
         profile = null
         catalog = emptyList()
         gate = null
@@ -277,9 +283,17 @@ class AppViewModel(
         // in the view model, so a statement still ends if Android destroys the
         // activity outright. A service that owns the session is the upgrade path.
         viewModelScope.launch {
-            val outcome = withContext(Dispatchers.IO) { runCatching { call(session) } }
-            running = false
-            keepAlive(null)
+            val outcome = try {
+                withContext(Dispatchers.IO) { runCatching { call(session) } }
+            } finally {
+                // Also when the view model is cleared mid-statement (the app
+                // swiped away): otherwise the foreground service outlives it.
+                keepAlive(null)
+                if (this@AppViewModel.session === session) running = false
+            }
+            // A statement that ends after a disconnect, or after switching to
+            // another connection, must not land in the new one's state.
+            if (this@AppViewModel.session !== session) return@launch
             outcome.onSuccess { outcome ->
                 when (outcome) {
                     is RunOutcome.Done -> done(outcome.result)
@@ -398,21 +412,27 @@ class AppViewModel(
         val profile = profile ?: return
         viewModelScope.launch {
             val changed = withContext(Dispatchers.IO) { runCatching { session.setMode(next) } }
+            // It may complete after the user left this connection: the
+            // profile still takes the mode, the screen of another does not.
+            val current = this@AppViewModel.session === session
             changed.onSuccess {
-                mode = next
                 val saved = profile.copy(mode = next)
-                this@AppViewModel.profile = saved
                 profiles = profiles.map { if (it.id == saved.id) saved else it }
                 store.save(profiles)
+                if (!current) return@onSuccess
+                mode = next
+                this@AppViewModel.profile = saved
                 then()
-            }.onFailure { failure -> tab?.let { it.error = failure.reason() } }
+            }.onFailure { failure -> if (current) tab?.let { it.error = failure.reason() } }
         }
     }
 
     fun cancel() {
         val session = session ?: return
         // A thread of its own: the session's lock is held by what it stops.
-        Thread { session.cancel() }.start()
+        // A disconnect may destroy the session first; a cancel then has
+        // nothing left to stop, and must not take the app down trying.
+        Thread { runCatching { session.cancel() } }.start()
     }
 
     fun refreshCatalog() {
