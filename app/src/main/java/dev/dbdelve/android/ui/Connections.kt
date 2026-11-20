@@ -72,14 +72,13 @@ import uniffi.dbdelve_core.Mode
 @Composable
 fun ConnectionsScreen(model: AppViewModel) {
     var filter by remember { mutableStateOf("") }
-    var changelog by remember { mutableStateOf(false) }
     var menu by remember { mutableStateOf(false) }
     var exporting by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf<android.net.Uri?>(null) }
     // Android's own file picker: the file may be in Downloads, a chat's
     // attachments or a cloud drive, and the app needs no storage permission.
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> importing = uri }
-    if (changelog) ChangelogSheet { changelog = false }
+    if (model.showChangelog) ChangelogSheet(onDismiss = model::closeChangelog)
     if (exporting) ExportDialog(model) { exporting = false }
     importing?.let { uri ->
         ImportFlow(model, uri, onDismiss = { importing = null }) { count ->
@@ -109,7 +108,7 @@ fun ConnectionsScreen(model: AppViewModel) {
                             DropdownMenuItem(
                                 text = { Text("What's new") },
                                 leadingIcon = { Icon(Icons.Default.NewReleases, null) },
-                                onClick = { menu = false; changelog = true },
+                                onClick = { menu = false; model.showChangelog = true },
                             )
                             DropdownMenuItem(
                                 text = { Text(if (model.checkingUpdates) "Checking for updates…" else "Check for updates") },

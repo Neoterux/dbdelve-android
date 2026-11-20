@@ -21,8 +21,11 @@ class DBDelveApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        val updates = UpdateStore(this)
+        val info = packageManager.getPackageInfo(packageName, 0)
+        updates.noteLaunch(installedVersion, updatedSinceInstall = info.lastUpdateTime > info.firstInstallTime)
         // The updater's channels and daily check, and an APK already downloaded.
-        Updater.init(this, UpdateStore(this), installedVersion)
+        Updater.init(this, updates, installedVersion)
     }
 
     val model: AppViewModel by lazy {
