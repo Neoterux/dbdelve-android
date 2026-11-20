@@ -931,6 +931,14 @@ class AppViewModel(
         private set
     var automaticUpdates by mutableStateOf(updates.automatic)
         private set
+    /** This build's own changelog is open: from the menu, or once after an update. */
+    var showChangelog by mutableStateOf(updates.changelogPending)
+
+    fun closeChangelog() {
+        showChangelog = false
+        updates.changelogPending = false
+    }
+
     /** The release's notes are open: from What's new, or a notification. */
     var showUpdateNotes by mutableStateOf(false)
 

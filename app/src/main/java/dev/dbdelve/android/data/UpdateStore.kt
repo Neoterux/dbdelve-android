@@ -6,7 +6,8 @@ import android.content.Context
  * What the update check remembers: whether it runs by itself (on launch and
  * in the background), when it last asked GitHub, the newest release it found
  * (so the notice survives a restart without asking again), the version it
- * last notified about, and the version the user put off.
+ * last notified about, the version the user put off, and the version that
+ * last ran, so What's new opens once after an update.
  */
 class UpdateStore(context: Context) {
     private val prefs = context.getSharedPreferences("updates", Context.MODE_PRIVATE)
@@ -23,6 +24,28 @@ class UpdateStore(context: Context) {
     var notified: String?
         get() = prefs.getString("notified", null)
         set(value) = prefs.edit().putString("notified", value).apply()
+
+    /** The version that last ran, to tell a launch after an update from any other. */
+    var lastRun: String?
+        get() = prefs.getString("last_run", null)
+        set(value) = prefs.edit().putString("last_run", value).apply()
+
+    /** Updated since the last launch, and What's new not shown for it yet. */
+    var changelogPending: Boolean
+        get() = prefs.getBoolean("changelog_pending", false)
+        set(value) = prefs.edit().putBoolean("changelog_pending", value).apply()
+
+    /**
+     * At each launch: whether [installed] is newer than the version that ran
+     * last. Before 0.6.1 nothing remembered that, so the first time
+     * [updatedSinceInstall] (Android's own record of an update) answers.
+     */
+    fun noteLaunch(installed: String, updatedSinceInstall: Boolean) {
+        val last = lastRun
+        val updated = if (last == null) updatedSinceInstall else Updates.isNewer(installed, last)
+        if (updated) changelogPending = true
+        lastRun = installed
+    }
 
     var dismissed: String?
         get() = prefs.getString("dismissed", null)

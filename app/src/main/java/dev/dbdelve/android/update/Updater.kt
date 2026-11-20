@@ -97,7 +97,13 @@ object Updater {
         schedule(store.automatic)
         // An APK already downloaded for the release found is ready; anything
         // else in the folder (an older one, one now installed) goes.
-        val found = store.found?.takeIf { Updates.isNewer(it.version, installed) }
+        // The release found is installed now (this is it, or later): its
+        // notice and notifications are done with.
+        if (store.found?.let { Updates.isNewer(it.version, installed) } == false) {
+            store.found = null
+            listOf(NOTIFY_AVAILABLE, NOTIFY_DOWNLOAD, NOTIFY_RESULT).forEach { dismiss(app, it) }
+        }
+        val found = store.found
         val ready = found?.let { apkFile(app, it.version) }?.takeIf { it.isFile }
         folder(app).listFiles()?.filter { it != ready }?.forEach { it.delete() }
         if (ready != null && state.value == Download.Idle) state.value = Download.Ready(found.version, ready)

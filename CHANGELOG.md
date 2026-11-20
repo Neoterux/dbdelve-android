@@ -5,6 +5,18 @@ Every user-visible change, newest first. The app shows this file under
 reading the code. Add to *Unreleased* with each change; a release renames it
 to its version and date.
 
+## 0.6.1 (2026-11-20)
+
+### Added
+
+- What's new opens by itself the first time the app starts after an update,
+  so you see what changed; once closed, it stays closed until the next one.
+
+### Fixed
+
+- After an update installs, its "ready to install" and "available"
+  notifications are cleared instead of staying in the shade.
+
 ## 0.6.0 (2026-11-19)
 
 ### Added
