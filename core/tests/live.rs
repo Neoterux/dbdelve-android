@@ -246,6 +246,21 @@ fn live_mysql() {
         "KILL QUERY stopped the sleep"
     );
 
+    // Catalog reads have a connection of their own: Users answers while a
+    // statement is still running, instead of queueing behind it.
+    let running = Arc::clone(&session);
+    let statement =
+        std::thread::spawn(move || running.run("SELECT SLEEP(5)".into(), 10, vec![], false, None));
+    std::thread::sleep(Duration::from_millis(300));
+    let asked = Instant::now();
+    assert!(!session.users().unwrap().is_empty());
+    assert!(
+        asked.elapsed() < Duration::from_secs(2),
+        "users waited {:?} behind a running statement",
+        asked.elapsed()
+    );
+    statement.join().unwrap().unwrap();
+
     let tables = session.catalog().unwrap();
     assert!(
         tables

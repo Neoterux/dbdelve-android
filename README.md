@@ -267,6 +267,13 @@ The user must log in with a blank password (`trust` authentication).
   [TLS](#tls), not Off.
 - No statement timeout is set: `max_execution_time` arrived in 5.7. Cancel
   sends `KILL QUERY` on a side connection.
+- **Catalog reads have a connection of their own.** Users, the schema,
+  columns and keys are read on a second, read-only connection, so they
+  load while a statement runs. It gives up after 20 seconds without an
+  answer, which is what a connection dropped by a VPN or firewall looks
+  like, opens a new connection and tries once more; if that fails too, the
+  pane says the server is not answering. Statements have no time limit;
+  their connection uses TCP keepalive, so a dead one is noticed in minutes.
 - Auth is `mysql_native_password`, 5.6's default.
 - **Table sizes only for the connection's own database.** The Schema pane
   lists every database's tables by name, which 5.6 answers from each
