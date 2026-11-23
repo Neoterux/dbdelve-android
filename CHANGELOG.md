@@ -5,6 +5,19 @@ Every user-visible change, newest first. The app shows this file under
 reading the code. Add to *Unreleased* with each change; a release renames it
 to its version and date.
 
+## 0.6.2 (2026-11-23)
+
+### Fixed
+
+- On MySQL 5.6 servers with many databases, Users (and anything else right
+  after connecting) could take a long time to appear. The app read every
+  table's size when it connected, which makes 5.6 open every table on the
+  server and, with `innodb_stats_on_metadata` on, recompute its
+  statistics; everything else waited behind that. Now the Schema pane shows
+  sizes only for the connection's own database and names elsewhere. On a
+  test server with 4,000 tables, Users after connecting went from 2.1 s to
+  0.5 s, and on a busier server the gap is larger.
+
 ## 0.6.1 (2026-11-20)
 
 ### Added

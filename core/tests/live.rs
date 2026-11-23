@@ -252,6 +252,20 @@ fn live_mysql() {
             .iter()
             .all(|entry| entry.kind != ObjectKind::Collection)
     );
+    // Sizes for the connection's own database, which the session opened in;
+    // names alone everywhere else, so the read opens no other table.
+    let held = tables
+        .iter()
+        .find(|entry| entry.schema == config.database && entry.name == "android_held")
+        .expect("android_held is listed");
+    assert!(held.size_bytes.is_some(), "own database has sizes");
+    assert!(
+        tables
+            .iter()
+            .filter(|entry| entry.schema != config.database)
+            .all(|entry| entry.size_bytes.is_none()),
+        "other databases have names only"
+    );
 }
 
 #[test]

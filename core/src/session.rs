@@ -5,6 +5,7 @@
 //! a runtime of its own, from the caller's thread: nothing that leaves this
 //! module is a future.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -519,18 +520,37 @@ impl Session {
                     .collect())
             }
             Driver::MySql(conn) => {
-                let rows: Vec<(String, String, String, Option<u64>)> = conn
+                // Names and kinds only: before 8.0 the server answers these
+                // from each table's .frm file. Asking for a size makes it open
+                // every table of every database instead and, with
+                // innodb_stats_on_metadata on (5.6 before 5.6.6, or set),
+                // recompute each one's InnoDB statistics, which on a large
+                // server takes seconds to minutes; anything else on the
+                // session (the Users pane, a statement) waits behind it.
+                let rows: Vec<(String, String, String)> = conn
                     .query(
-                        "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE, DATA_LENGTH + INDEX_LENGTH \
+                        "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
                          FROM information_schema.TABLES \
                          WHERE TABLE_SCHEMA NOT IN \
                          ('mysql', 'information_schema', 'performance_schema', 'sys') \
                          ORDER BY 1, 2",
                     )
                     .map_err(query_error)?;
+                // Sizes for the connection's own database alone: a constant
+                // schema lets the server open only that one's tables.
+                let sizes: HashMap<(String, String), u64> = conn
+                    .query::<(String, String, Option<u64>), _>(
+                        "SELECT TABLE_SCHEMA, TABLE_NAME, DATA_LENGTH + INDEX_LENGTH \
+                         FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
+                    )
+                    .map_err(query_error)?
+                    .into_iter()
+                    .filter_map(|(schema, name, size)| Some(((schema, name), size?)))
+                    .collect();
                 Ok(rows
                     .into_iter()
-                    .map(|(schema, name, kind, size_bytes)| CatalogEntry {
+                    .map(|(schema, name, kind)| CatalogEntry {
+                        size_bytes: sizes.get(&(schema.clone(), name.clone())).copied(),
                         schema,
                         name,
                         kind: if kind == "VIEW" {
@@ -538,7 +558,6 @@ impl Session {
                         } else {
                             ObjectKind::Table
                         },
-                        size_bytes,
                     })
                     .collect())
             }
