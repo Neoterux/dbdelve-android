@@ -268,6 +268,14 @@ The user must log in with a blank password (`trust` authentication).
 - No statement timeout is set: `max_execution_time` arrived in 5.7. Cancel
   sends `KILL QUERY` on a side connection.
 - Auth is `mysql_native_password`, 5.6's default.
+- **Table sizes only for the connection's own database.** The Schema pane
+  lists every database's tables by name, which 5.6 answers from each
+  table's definition file. A size makes the server open the table instead
+  and, with `innodb_stats_on_metadata` on (the default before 5.6.6),
+  recompute its statistics; across a whole server that takes long enough
+  to hold up everything after it on the session, the Users list included.
+  So sizes are read for the database the connection names, and the others
+  show names alone.
 
 ## TLS
 
