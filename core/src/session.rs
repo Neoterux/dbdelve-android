@@ -102,9 +102,28 @@ pub struct Session {
     driver: Mutex<Driver>,
     mode: Mutex<Mode>,
     canceller: Canceller,
+    /// MySQL only: the connection catalog reads (users, schema, columns,
+    /// keys) run on, apart from statements. See [`Session::mysql_meta`].
+    meta: Option<Mutex<MySqlMeta>>,
     /// TLS files MySQL's and MongoDB's drivers read, kept until the session
     /// closes: a side connection reads them again.
     _tls_files: crate::tls::Files,
+}
+
+/// How long a catalog read on MySQL may go unanswered before the app gives
+/// up on that connection. Statements have no such limit.
+const META_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// TCP keepalive on MySQL's statement connection, so a path that went
+/// silent is found in minutes, not never. Android keeps its own probe count
+/// and spacing (about 11 minutes); only the idle time before them is set.
+const KEEPALIVE_MS: u32 = 30_000;
+
+/// MySQL's connection for catalog reads: opened on first use, opened again
+/// when it stops answering.
+struct MySqlMeta {
+    opts: mysql::Opts,
+    conn: Option<mysql::Conn>,
 }
 
 fn connect_error(message: impl ToString) -> CoreError {
@@ -176,16 +195,27 @@ impl Session {
     pub fn connect(config: ConnectionConfig, mode: Mode) -> Result<Arc<Self>, CoreError> {
         let material = crate::tls::material(&config)?;
         let files = crate::tls::files(&config)?;
-        let (driver, canceller) = match config.engine {
-            Engine::Postgres => connect_postgres(&config, &material)?,
-            Engine::MySql => connect_mysql(&config, &files)?,
-            Engine::Mongo => connect_mongo(&config, &files)?,
+        let (driver, canceller, meta) = match config.engine {
+            Engine::Postgres => {
+                let (driver, canceller) = connect_postgres(&config, &material)?;
+                (driver, canceller, None)
+            }
+            Engine::MySql => {
+                let (driver, canceller, opts) = connect_mysql(&config, &files)?;
+                let meta = MySqlMeta { opts, conn: None };
+                (driver, canceller, Some(Mutex::new(meta)))
+            }
+            Engine::Mongo => {
+                let (driver, canceller) = connect_mongo(&config, &files)?;
+                (driver, canceller, None)
+            }
         };
         let session = Session {
             engine: config.engine,
             driver: Mutex::new(driver),
             mode: Mutex::new(mode),
             canceller,
+            meta,
             _tls_files: files,
         };
         session.hold(mode)?;
@@ -257,6 +287,9 @@ impl Session {
     /// The server's users and roles. DBDelve's own catalog read, like
     /// [`Session::catalog`].
     pub fn users(&self) -> Result<Vec<DbUser>, CoreError> {
+        if let Some(read) = self.mysql_meta(mysql_users) {
+            return read;
+        }
         let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *driver {
             Driver::Postgres { runtime, client } => {
@@ -320,32 +353,7 @@ impl Session {
                     })
                     .collect())
             }
-            Driver::MySql(conn) => {
-                // `password_expired` arrived in 5.6.6.
-                let rows: Vec<(String, String, String, String)> = conn
-                    .query(
-                        "SELECT User, Host, Super_priv, password_expired FROM mysql.user \
-                         ORDER BY User, Host",
-                    )
-                    .or_else(|_| {
-                        conn.query("SELECT User, Host, Super_priv, 'N' FROM mysql.user ORDER BY User, Host")
-                    })
-                    .map_err(query_error)?;
-                Ok(rows
-                    .into_iter()
-                    .map(|(name, host, superuser, expired)| DbUser {
-                        account: Account { name, host },
-                        can_login: true,
-                        superuser: superuser == "Y",
-                        attributes: if expired == "Y" {
-                            vec!["password expired".to_owned()]
-                        } else {
-                            Vec::new()
-                        },
-                        roles: Vec::new(),
-                    })
-                    .collect())
-            }
+            Driver::MySql(_) => unreachable!("MySQL catalog reads go through Session::mysql_meta"),
             Driver::Mongo { runtime, database } => {
                 let reply = runtime
                     .block_on(async { database.run_command(bson::doc! { "usersInfo": 1 }).await })
@@ -374,6 +382,9 @@ impl Session {
         if account.name.contains('\\') || account.host.contains('\\') {
             return Err(query_error("Names with a backslash are not looked up."));
         }
+        if let Some(read) = self.mysql_meta(|conn| mysql_grants(conn, &account)) {
+            return read;
+        }
         let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *driver {
             Driver::Postgres { runtime, client } => {
@@ -394,24 +405,7 @@ impl Session {
                     })
                     .collect())
             }
-            Driver::MySql(conn) => {
-                let host = if account.host.is_empty() {
-                    "%"
-                } else {
-                    &account.host
-                };
-                let grants: Vec<String> = conn
-                    .query(format!(
-                        "SHOW GRANTS FOR '{}'@'{}'",
-                        account.name.replace('\'', "''"),
-                        host.replace('\'', "''")
-                    ))
-                    .map_err(query_error)?;
-                Ok(grants
-                    .into_iter()
-                    .map(|grant| without_hash(&grant))
-                    .collect())
-            }
+            Driver::MySql(_) => unreachable!("MySQL catalog reads go through Session::mysql_meta"),
             Driver::Mongo { runtime, database } => {
                 let reply = runtime
                     .block_on(async {
@@ -488,6 +482,9 @@ impl Session {
     }
 
     pub fn catalog(&self) -> Result<Vec<CatalogEntry>, CoreError> {
+        if let Some(read) = self.mysql_meta(mysql_catalog) {
+            return read;
+        }
         let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *driver {
             Driver::Postgres { runtime, client } => {
@@ -519,48 +516,7 @@ impl Session {
                     })
                     .collect())
             }
-            Driver::MySql(conn) => {
-                // Names and kinds only: before 8.0 the server answers these
-                // from each table's .frm file. Asking for a size makes it open
-                // every table of every database instead and, with
-                // innodb_stats_on_metadata on (5.6 before 5.6.6, or set),
-                // recompute each one's InnoDB statistics, which on a large
-                // server takes seconds to minutes; anything else on the
-                // session (the Users pane, a statement) waits behind it.
-                let rows: Vec<(String, String, String)> = conn
-                    .query(
-                        "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
-                         FROM information_schema.TABLES \
-                         WHERE TABLE_SCHEMA NOT IN \
-                         ('mysql', 'information_schema', 'performance_schema', 'sys') \
-                         ORDER BY 1, 2",
-                    )
-                    .map_err(query_error)?;
-                // Sizes for the connection's own database alone: a constant
-                // schema lets the server open only that one's tables.
-                let sizes: HashMap<(String, String), u64> = conn
-                    .query::<(String, String, Option<u64>), _>(
-                        "SELECT TABLE_SCHEMA, TABLE_NAME, DATA_LENGTH + INDEX_LENGTH \
-                         FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
-                    )
-                    .map_err(query_error)?
-                    .into_iter()
-                    .filter_map(|(schema, name, size)| Some(((schema, name), size?)))
-                    .collect();
-                Ok(rows
-                    .into_iter()
-                    .map(|(schema, name, kind)| CatalogEntry {
-                        size_bytes: sizes.get(&(schema.clone(), name.clone())).copied(),
-                        schema,
-                        name,
-                        kind: if kind == "VIEW" {
-                            ObjectKind::View
-                        } else {
-                            ObjectKind::Table
-                        },
-                    })
-                    .collect())
-            }
+            Driver::MySql(_) => unreachable!("MySQL catalog reads go through Session::mysql_meta"),
             Driver::Mongo { runtime, database } => {
                 let mut names = runtime
                     .block_on(async { database.list_collection_names().await })
@@ -583,6 +539,9 @@ impl Session {
     /// has no schema, so there it is every field found in a random sample of
     /// [`COLUMN_SAMPLE`] documents, in the order they first appear.
     pub fn columns(&self, schema: String, name: String) -> Result<Vec<Column>, CoreError> {
+        if let Some(read) = self.mysql_meta(|conn| mysql_columns(conn, &schema, &name)) {
+            return read;
+        }
         let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *driver {
             Driver::Postgres { runtime, client } => {
@@ -603,19 +562,7 @@ impl Session {
                     })
                     .collect())
             }
-            Driver::MySql(conn) => {
-                let rows: Vec<(String, String)> = conn
-                    .exec(
-                        "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS \
-                         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
-                        (schema, name),
-                    )
-                    .map_err(query_error)?;
-                Ok(rows
-                    .into_iter()
-                    .map(|(name, type_tag)| Column { name, type_tag })
-                    .collect())
-            }
+            Driver::MySql(_) => unreachable!("MySQL catalog reads go through Session::mysql_meta"),
             Driver::Mongo { runtime, database } => {
                 let sample = runtime
                     .block_on(async {
@@ -634,6 +581,9 @@ impl Session {
     /// The primary key's columns, in key order; none for a table without one,
     /// a view, or a MongoDB view or system collection, which are not edited.
     pub fn primary_key(&self, schema: String, name: String) -> Result<Vec<String>, CoreError> {
+        if let Some(read) = self.mysql_meta(|conn| mysql_primary_key(conn, &schema, &name)) {
+            return read;
+        }
         let mut driver = self.driver.lock().unwrap_or_else(PoisonError::into_inner);
         match &mut *driver {
             Driver::Postgres { runtime, client } => {
@@ -650,14 +600,7 @@ impl Session {
                     .map_err(|error| query_error(postgres_error(error)))?;
                 Ok(rows.iter().map(|row| row.get(0)).collect())
             }
-            Driver::MySql(conn) => conn
-                .exec(
-                    "SELECT COLUMN_NAME FROM information_schema.STATISTICS \
-                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' \
-                     ORDER BY SEQ_IN_INDEX",
-                    (schema, name),
-                )
-                .map_err(query_error),
+            Driver::MySql(_) => unreachable!("MySQL catalog reads go through Session::mysql_meta"),
             Driver::Mongo { runtime, database } => {
                 if name.starts_with("system.") {
                     return Ok(Vec::new());
@@ -775,6 +718,43 @@ impl Session {
                     ))
                 }),
             Driver::Mongo { .. } => Ok(()),
+        }
+    }
+
+    /// Runs a MySQL catalog read on the session's catalog connection, or
+    /// None on another engine. Never behind the statement connection's lock,
+    /// so Users and the schema load while a statement runs. A connection that
+    /// stops answering ([`META_TIMEOUT`]) or breaks is opened again and the
+    /// read tried once more; if the new one fails as well, the error says the
+    /// server is not answering instead of the pane waiting for ever.
+    fn mysql_meta<T>(
+        &self,
+        read: impl Fn(&mut mysql::Conn) -> mysql::Result<T>,
+    ) -> Option<Result<T, CoreError>> {
+        let meta = self.meta.as_ref()?;
+        let mut meta = meta.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            let fresh = meta.conn.is_none();
+            if fresh {
+                match mysql::Conn::new(meta.opts.clone()) {
+                    Ok(conn) => meta.conn = Some(conn),
+                    Err(error) => return Some(Err(no_answer(&error))),
+                }
+            }
+            let Some(conn) = meta.conn.as_mut() else {
+                unreachable!("opened just above")
+            };
+            match read(conn) {
+                Ok(value) => return Some(Ok(value)),
+                // The server answered with an error: the connection is fine.
+                Err(error @ mysql::Error::MySqlError(_)) => return Some(Err(query_error(error))),
+                Err(error) => {
+                    meta.conn = None;
+                    if fresh {
+                        return Some(Err(no_answer(&error)));
+                    }
+                }
+            }
         }
     }
 
@@ -1027,7 +1007,7 @@ async fn run_postgres(
 fn connect_mysql(
     config: &ConnectionConfig,
     files: &crate::tls::Files,
-) -> Result<(Driver, Canceller), CoreError> {
+) -> Result<(Driver, Canceller, mysql::Opts), CoreError> {
     let builder = mysql::OptsBuilder::new()
         .ip_or_hostname(Some(config.host.clone()))
         .tcp_port(config.port)
@@ -1049,11 +1029,22 @@ fn connect_mysql(
                     ),
             ),
         });
-    let opts = mysql::Opts::from(builder);
+    // Catalog reads answer in well under a second; one that does not has
+    // lost its connection (a VPN or firewall dropping it while idle is the
+    // usual cause), so it gives up rather than wait for ever. Read-only on
+    // the server too: it only ever reads.
+    let meta = mysql::Opts::from(
+        builder
+            .clone()
+            .read_timeout(Some(META_TIMEOUT))
+            .write_timeout(Some(META_TIMEOUT))
+            .init(vec!["SET SESSION TRANSACTION READ ONLY"]),
+    );
+    let opts = mysql::Opts::from(builder.tcp_keepalive_time_ms(Some(KEEPALIVE_MS)));
     let conn =
         mysql::Conn::new(opts.clone()).map_err(|error| mysql_tls_hint(error, config.ssl_mode))?;
     let id = conn.connection_id();
-    Ok((Driver::MySql(conn), Canceller::MySql { opts, id }))
+    Ok((Driver::MySql(conn), Canceller::MySql { opts, id }, meta))
 }
 
 /// Runs one statement and keeps `limit` rows. Past the limit a stoppable
@@ -1551,6 +1542,127 @@ fn mongo_roles(roles: Option<&Vec<Bson>>) -> Vec<RoleRef> {
             database: role.get_str("db").unwrap_or_default().to_owned(),
         })
         .collect()
+}
+
+/// The catalog connection gave up: why, and what to do.
+fn no_answer(error: &mysql::Error) -> CoreError {
+    query_error(format!(
+        "{error}\n\nThe server did not answer within {} s, twice. The network path to it \
+         may have dropped: VPNs and firewalls close connections left idle. Pull down to try \
+         again; if it keeps failing, disconnect and connect again.",
+        META_TIMEOUT.as_secs()
+    ))
+}
+
+fn mysql_users(conn: &mut mysql::Conn) -> mysql::Result<Vec<DbUser>> {
+    // `password_expired` arrived in 5.6.6.
+    let rows: Vec<(String, String, String, String)> = conn
+        .query(
+            "SELECT User, Host, Super_priv, password_expired FROM mysql.user \
+             ORDER BY User, Host",
+        )
+        // Only when the server refused the query (before 5.6.6, no such
+        // column): a connection that stopped answering is not asked again.
+        .or_else(|error| match error {
+            mysql::Error::MySqlError(_) => {
+                conn.query("SELECT User, Host, Super_priv, 'N' FROM mysql.user ORDER BY User, Host")
+            }
+            other => Err(other),
+        })?;
+    Ok(rows
+        .into_iter()
+        .map(|(name, host, superuser, expired)| DbUser {
+            account: Account { name, host },
+            can_login: true,
+            superuser: superuser == "Y",
+            attributes: if expired == "Y" {
+                vec!["password expired".to_owned()]
+            } else {
+                Vec::new()
+            },
+            roles: Vec::new(),
+        })
+        .collect())
+}
+
+fn mysql_grants(conn: &mut mysql::Conn, account: &Account) -> mysql::Result<Vec<String>> {
+    let host = if account.host.is_empty() {
+        "%"
+    } else {
+        &account.host
+    };
+    let grants: Vec<String> = conn.query(format!(
+        "SHOW GRANTS FOR '{}'@'{}'",
+        account.name.replace('\'', "''"),
+        host.replace('\'', "''")
+    ))?;
+    Ok(grants
+        .into_iter()
+        .map(|grant| without_hash(&grant))
+        .collect())
+}
+
+fn mysql_catalog(conn: &mut mysql::Conn) -> mysql::Result<Vec<CatalogEntry>> {
+    // Names and kinds only: before 8.0 the server answers these from each
+    // table's .frm file. Asking for a size makes it open every table of
+    // every database instead and, with innodb_stats_on_metadata on (5.6
+    // before 5.6.6, or set), recompute each one's InnoDB statistics, which
+    // on a large server takes seconds to minutes.
+    let rows: Vec<(String, String, String)> = conn.query(
+        "SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE \
+         FROM information_schema.TABLES \
+         WHERE TABLE_SCHEMA NOT IN \
+         ('mysql', 'information_schema', 'performance_schema', 'sys') \
+         ORDER BY 1, 2",
+    )?;
+    // Sizes for the connection's own database alone: a constant schema lets
+    // the server open only that one's tables.
+    let sizes: HashMap<(String, String), u64> = conn
+        .query::<(String, String, Option<u64>), _>(
+            "SELECT TABLE_SCHEMA, TABLE_NAME, DATA_LENGTH + INDEX_LENGTH \
+             FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE()",
+        )?
+        .into_iter()
+        .filter_map(|(schema, name, size)| Some(((schema, name), size?)))
+        .collect();
+    Ok(rows
+        .into_iter()
+        .map(|(schema, name, kind)| CatalogEntry {
+            size_bytes: sizes.get(&(schema.clone(), name.clone())).copied(),
+            schema,
+            name,
+            kind: if kind == "VIEW" {
+                ObjectKind::View
+            } else {
+                ObjectKind::Table
+            },
+        })
+        .collect())
+}
+
+fn mysql_columns(conn: &mut mysql::Conn, schema: &str, name: &str) -> mysql::Result<Vec<Column>> {
+    let rows: Vec<(String, String)> = conn.exec(
+        "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS \
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION",
+        (schema, name),
+    )?;
+    Ok(rows
+        .into_iter()
+        .map(|(name, type_tag)| Column { name, type_tag })
+        .collect())
+}
+
+fn mysql_primary_key(
+    conn: &mut mysql::Conn,
+    schema: &str,
+    name: &str,
+) -> mysql::Result<Vec<String>> {
+    conn.exec(
+        "SELECT COLUMN_NAME FROM information_schema.STATISTICS \
+         WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' \
+         ORDER BY SEQ_IN_INDEX",
+        (schema, name),
+    )
 }
 
 /// A `SHOW GRANTS` line without its password hash: what an account may do is

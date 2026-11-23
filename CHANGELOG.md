@@ -5,6 +5,18 @@ Every user-visible change, newest first. The app shows this file under
 reading the code. Add to *Unreleased* with each change; a release renames it
 to its version and date.
 
+## 0.6.3 (2026-11-23)
+
+### Fixed
+
+- On MySQL, Users could spin for ever. When the network dropped the
+  connection silently (VPNs and firewalls close idle ones), the app waited
+  for an answer that could never come, and Users also queued behind any
+  statement still running. Users, the schema, columns and keys now have a
+  connection of their own: they load while a statement runs, and one that
+  gets no answer in 20 seconds reconnects and tries again by itself. If the
+  server still does not answer, Users says so instead of spinning.
+
 ## 0.6.2 (2026-11-23)
 
 ### Fixed
